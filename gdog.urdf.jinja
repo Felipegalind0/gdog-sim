@@ -1,0 +1,98 @@
+<?xml version="1.0"?>
+<robot name="randomized_wheeled_quadruped">
+  <!-- Base Link -->
+  <link name="base_link">
+    <visual>
+      <geometry><box size="{{ body_length }} {{ body_width }} {{ body_height }}"/></geometry>
+      <material name="blue"><color rgba="0.2 0.4 0.8 1"/></material>
+    </visual>
+    <collision>
+      <geometry><box size="{{ body_length }} {{ body_width }} {{ body_height }}"/></geometry>
+    </collision>
+    <inertial>
+      <mass value="{{ body_mass }}"/>
+      <inertia ixx="0.05" ixy="0" ixz="0" iyy="0.1" iyz="0" izz="0.1"/>
+    </inertial>
+  </link>
+
+  <!-- Macro loop to generate all 4 legs and wheels -->
+  {% for prefix, dx, dy in [('fl', 1, 1), ('fr', 1, -1), ('rl', -1, 1), ('rr', -1, -1)] %}
+  
+  <!-- THIGH -->
+  <link name="{{ prefix }}_thigh">
+    <visual>
+      <geometry><box size="{{ leg_thickness }} {{ leg_thickness }} {{ thigh_length }}"/></geometry>
+      <origin xyz="0 0 -{{ thigh_length / 2 }}"/>
+      <material name="green"><color rgba="0.2 0.8 0.2 1"/></material>
+    </visual>
+    <collision>
+      <geometry><box size="{{ leg_thickness }} {{ leg_thickness }} {{ thigh_length }}"/></geometry>
+      <origin xyz="0 0 -{{ thigh_length / 2 }}"/>
+    </collision>
+    <inertial>
+      <mass value="1.0"/><origin xyz="0 0 -{{ thigh_length / 2 }}"/>
+      <inertia ixx="0.005" ixy="0" ixz="0" iyy="0.005" iyz="0" izz="0.001"/>
+    </inertial>
+  </link>
+
+  <!-- CALF -->
+  <link name="{{ prefix }}_calf">
+    <visual>
+      <geometry><box size="{{ calf_thickness }} {{ calf_thickness }} {{ calf_length }}"/></geometry>
+      <origin xyz="0 0 -{{ calf_length / 2 }}"/>
+      <material name="orange"><color rgba="0.8 0.5 0.1 1"/></material>
+    </visual>
+    <collision>
+      <geometry><box size="{{ calf_thickness }} {{ calf_thickness }} {{ calf_length }}"/></geometry>
+      <origin xyz="0 0 -{{ calf_length / 2 }}"/>
+    </collision>
+    <inertial>
+      <mass value="0.5"/><origin xyz="0 0 -{{ calf_length / 2 }}"/>
+      <inertia ixx="0.003" ixy="0" ixz="0" iyy="0.003" iyz="0" izz="0.0005"/>
+    </inertial>
+  </link>
+
+  <!-- WHEEL -->
+  <link name="{{ prefix }}_wheel">
+    <visual>
+      <!-- Cylinders in URDF align to Z-axis by default, we rotate to roll on Y -->
+      <geometry><cylinder radius="{{ wheel_radius }}" length="{{ wheel_width }}"/></geometry>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/> 
+      <material name="dark_grey"><color rgba="0.3 0.3 0.3 1"/></material>
+    </visual>
+    <collision>
+      <geometry><cylinder radius="{{ wheel_radius }}" length="{{ wheel_width }}"/></geometry>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+    </collision>
+    <inertial>
+      <mass value="0.3"/>
+      <inertia ixx="0.001" ixy="0" ixz="0" iyy="0.001" iyz="0" izz="0.001"/>
+    </inertial>
+  </link>
+
+  <!-- JOINTS -->
+  <joint name="{{ prefix }}_hip" type="revolute">
+    <parent link="base_link"/>
+    <child link="{{ prefix }}_thigh"/>
+    <origin xyz="{{ dx * (body_length / 2 - 0.05) }} {{ dy * (body_width / 2 + leg_thickness/2) }} 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-1.5" upper="1.5" effort="100" velocity="5"/>
+  </joint>
+
+  <joint name="{{ prefix }}_knee" type="revolute">
+    <parent link="{{ prefix }}_thigh"/>
+    <child link="{{ prefix }}_calf"/>
+    <origin xyz="0 0 -{{ thigh_length }}"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-2.5" upper="0" effort="100" velocity="5"/>
+  </joint>
+
+  <joint name="{{ prefix }}_wheel_joint" type="continuous">
+    <parent link="{{ prefix }}_calf"/>
+    <child link="{{ prefix }}_wheel"/>
+    <origin xyz="0 0 -{{ calf_length }}"/>
+    <axis xyz="0 1 0"/> <!-- Rotate around Y axis -->
+  </joint>
+
+  {% endfor %}
+</robot>
