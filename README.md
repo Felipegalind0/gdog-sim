@@ -1,6 +1,8 @@
-# gdog (MVP Robot Dog Simulator)
+# gdog sim
 
-A minimal viable product (MVP) for a quadruped robot simulation using the [Genesis](https://github.com/Genesis-Embodied-AI/Genesis) physics engine. This simulator is explicitly optimized for Apple Silicon (such as the M1 MacBook Air), utilizing the Metal backend for fast, hardware-accelerated physics and rendering.
+![gdog_v1](gdog_v1.png)
+
+A minimal wheeled quadruped robot simulation using the [Genesis](https://github.com/Genesis-Embodied-AI/Genesis) physics engine. This simulator is explicitly optimized for Apple Silicon (such as the M1 MacBook Air), utilizing the Metal backend for fast, hardware-accelerated physics and rendering.
 
 ## Features
 - **Custom Quadruped URDF**: Features a procedural 4-legged robot (`simple_robot.urdf`) with a central chassis and independent 2-segment legs (thighs and calves) marked in contrasting colors.
