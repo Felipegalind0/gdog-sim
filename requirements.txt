@@ -1,1 +1,5 @@
 genesis-world
+fastapi
+uvicorn
+aiortc
+aiohttp

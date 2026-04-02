@@ -4,6 +4,62 @@ import numpy as np
 from jinja2 import Template
 import tempfile
 import os
+import threading
+import json
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+import uvicorn
+from aiortc import RTCPeerConnection, RTCSessionDescription
+
+class CommandState:
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.vx = 0.0
+        self.omega = 0.0
+
+    def update(self, vx, omega):
+        with self._lock:
+            self.vx = vx
+            self.omega = omega
+
+    def get(self):
+        with self._lock:
+            return self.vx, self.omega
+
+state = CommandState()
+app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], # Allow your React app
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.post("/offer")
+async def offer(params: dict):
+    offer_sdp = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
+    pc = RTCPeerConnection()
+    
+    @pc.on("datachannel")
+    def on_datachannel(channel):
+        @channel.on("message")
+        def on_message(message):
+            try:
+                data = json.loads(message)
+                state.update(data.get("vx", 0.0), data.get("omega", 0.0))
+            except Exception:
+                pass
+
+    await pc.setRemoteDescription(offer_sdp)
+    answer = await pc.createAnswer()
+    await pc.setLocalDescription(answer)
+    
+    return {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
+
+def run_server():
+    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="error")
 
 def generate_random_robot_urdf():
     """Reads the Jinja template, randomizes parameters, and returns a path to a temporary URDF."""
@@ -123,17 +179,34 @@ def main():
         cam = scene.add_camera(res=(1920, 1080), pos=(1.5, -1.5, 1.0), lookat=(0, 0, 0.3), fov=40, GUI=False)
         cam.start_recording()
 
+    print("Starting WebRTC FastAPI thread...")
+    flask_thread = threading.Thread(target=run_server, daemon=True)
+    flask_thread.start()
+
     print("Starting simulation loop...")
     steps = 500 if args.video else 10000
-    
-    # Target velocity for wheels (Let's make it drive forward slowly)
-    target_wheel_vel = np.array([5.0, 5.0, 5.0, 5.0]) 
 
     for i in range(steps):
         # 1. Maintain the standing position with the legs
         robot.control_dofs_position(target_leg_pos, dofs_idx_local=leg_dofs)
         
-        # 2. Drive the wheels with velocity control
+        # 2. Safely grab remote inputs from our WebRTC state
+        vx, omega = state.get()
+        
+        # Calculate skid-steer kinematics:
+        left_vel = vx - omega
+        right_vel = vx + omega
+
+        target_wheel_vel = np.zeros(len(wheel_dofs))
+        for j, joint_idx in enumerate(wheel_dofs):
+            joint_name = robot.joints[joint_idx].name
+            # Typically FL, RL (Left side) and FR, RR (Right side)
+            if "L" in joint_name.upper():
+                target_wheel_vel[j] = left_vel
+            elif "R" in joint_name.upper():
+                target_wheel_vel[j] = right_vel
+
+        # 3. Drive the wheels with velocity control
         robot.control_dofs_velocity(target_wheel_vel, dofs_idx_local=wheel_dofs)
         
         scene.step()
