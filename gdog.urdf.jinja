@@ -4,7 +4,7 @@
   <link name="base_link">
     <visual>
       <geometry><box size="{{ body_length }} {{ body_width }} {{ body_height }}"/></geometry>
-      <material name="blue"><color rgba="0.2 0.4 0.8 1"/></material>
+      <material name="body"><color rgba="0.439216 0.152941 0.227451 1"/></material>
     </visual>
     <collision>
       <geometry><box size="{{ body_length }} {{ body_width }} {{ body_height }}"/></geometry>
@@ -23,7 +23,7 @@
     <visual>
       <geometry><box size="{{ leg_thickness }} {{ leg_thickness }} {{ thigh_length }}"/></geometry>
       <origin xyz="0 0 -{{ thigh_length / 2 }}"/>
-      <material name="green"><color rgba="0.2 0.8 0.2 1"/></material>
+      <material name="upper_arm"><color rgba="0.972549 0.850980 0.309804 1"/></material>
     </visual>
     <collision>
       <geometry><box size="{{ leg_thickness }} {{ leg_thickness }} {{ thigh_length }}"/></geometry>
@@ -40,7 +40,7 @@
     <visual>
       <geometry><box size="{{ calf_thickness }} {{ calf_thickness }} {{ calf_length }}"/></geometry>
       <origin xyz="0 0 -{{ calf_length / 2 }}"/>
-      <material name="orange"><color rgba="0.8 0.5 0.1 1"/></material>
+      <material name="forearm"><color rgba="0.933333 0.741176 0.411765 1"/></material>
     </visual>
     <collision>
       <geometry><box size="{{ calf_thickness }} {{ calf_thickness }} {{ calf_length }}"/></geometry>

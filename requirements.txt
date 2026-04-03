@@ -1,5 +1,2 @@
-genesis-world
-fastapi
-uvicorn
-aiortc
-aiohttp
+-r requirements-runtime.txt
+-r requirements-genesis-deps.txt
