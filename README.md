@@ -1,90 +1,101 @@
-# gdog sim
+# gdog-sim
 
 ![gdog_v1](gdog_v1.png)
 
-A minimal wheeled quadruped robot simulation using the [Genesis](https://github.com/Genesis-Embodied-AI/Genesis) physics engine. This simulator is explicitly optimized for Apple Silicon (such as the M1 MacBook Air), utilizing the Metal backend for fast, hardware-accelerated physics and rendering.
+Wheeled quadruped simulation built with [Genesis](https://github.com/Genesis-Embodied-AI/Genesis), with a remote-control backend and a lunar visual theme.
 
 ## Features
-- **Custom Quadruped URDF**: Features a procedural 4-legged robot (`simple_robot.urdf`) with a central chassis and independent 2-segment legs (thighs and calves) marked in contrasting colors.
-- **Active Pose Control**: The simulation automatically actuates the joints to hold a Z-fold standing posture (hips at 45°, knees at -90°).
-- **Apple Silicon (M1) Optimizations**: 
-  - Hardcoded internal 1080p rendering resolution to decouple from demanding Retina fullscreen constraints.
-  - Disabled plane reflections to save raw GPU power and keep framerates well above 120 FPS.
-  - Increased ambient lighting for better visibility on macOS displays.
-- **Remote Control Server**:
-  - FastAPI server on port 8000
-  - WebSocket endpoint at `/ws`
-  - Optional WebRTC offer endpoint at `/offer`
-  - Capability endpoint at `/capabilities`
+
+- Procedural robot generation from `gdog.urdf.jinja` on every run
+- Seeded reproducibility via `--seed` (robot + terrain + visual randomization)
+- Randomized multi-patch terrain (`Terrain` morph) with flat center spawn patch
+- Space-style emissive sky sphere + moon-like terrain albedo
+- Follow camera that tracks robot position/yaw with orbital state (`lon`, `lat`, `zoom`)
+- On-screen camera diagnostics in the viewer (`x`, `y`, `lon`, `lat`, `zoom`, `fps`, `yawTotal`, `heading`)
+- FastAPI control backend:
+  - WebSocket endpoint: `/ws`
+  - Optional WebRTC offer endpoint: `/offer`
+  - Capability endpoint: `/capabilities`
+
+## Requirements
+
+- Python 3.10+ (3.11 recommended)
+- macOS Apple Silicon works well with Genesis GPU backend
+- A Python virtual environment (the repo `.venv` is recommended)
 
 ## Installation
-
-Make sure your Python virtual environment is active.
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-
-# Install the core requirements:
 pip install -r requirements.txt
 
-# You also need to manually install PyTorch for the Genesis engine tensor ops:
-pip install torch
-
-# Optional: enable WebRTC transport
+# Optional: enable WebRTC transport support
 pip install -r requirements-webrtc-optional.txt
 ```
 
-## Usage
+## Run
 
-The `main.py` script offers two distinct modes for observing the physics simulation:
+Interactive viewer:
 
-**1. Interactive Viewer (GUI)**
-Opens a floatable 1080p high-performance real-time 3D window.
 ```bash
 python main.py --render
 ```
 
-**2. Headless Video Render**
-Steps the physics engine without launching a UI window and saves the results to `wheeled_go2.mp4`.
+Interactive viewer with deterministic world generation:
+
+```bash
+python main.py --render --seed 12345
+```
+
+Headless video render:
+
 ```bash
 python main.py --video
 ```
 
+## Viewer Camera Controls
+
+- Follows robot position/yaw automatically
+- Mouse rotate drag adjusts camera latitude (`lat`)
+- Mouse wheel:
+  - horizontal scroll changes orbit longitude (`lon`)
+  - vertical scroll changes latitude (`lat`)
+- Hold `Shift` + wheel to zoom (`zoom`)
+
 ## Run With Web Controller
 
-Run the simulator and the remote app in two terminals.
+Run the simulator and remote UI in separate terminals.
 
-1. Terminal A in this repository:
+1. Terminal A (this repo):
 
 ```bash
 source .venv/bin/activate
 python main.py --render
 ```
 
-2. Terminal B in the sibling `gdog-remote` repository:
+2. Terminal B (`../gdog-remote`):
 
 ```bash
 npm install
 npm run dev
 ```
 
-3. Open the frontend URL shown by Vite, usually `http://localhost:5173`
+3. Open the Vite URL (usually `http://localhost:5173`)
 
 ## Transport Behavior
 
-- WebSocket is the default reliable path
-- WebRTC is optional and requires `aiortc`
-- Frontend probes `/capabilities` and enables WebRTC only when available
+- WebSocket is the default command path
+- WebRTC is optional and only enabled when backend capability probe reports support
+- If `aiortc` is missing, backend automatically stays in WebSocket mode
 
 ## Troubleshooting
 
-- Frontend runs but controls do nothing:
-  - Check this process is running and prints websocket client connection logs
-  - Verify backend responds at `http://localhost:8000/capabilities`
-- WebRTC connect fails:
-  - Install `aiortc` via `pip install -r requirements-webrtc-optional.txt`
-  - Restart simulator
-- Import errors on startup:
-  - Ensure `.venv` is active
+- `aiortc not installed. WebRTC disabled. Using WebSockets as primary.`
+  - This is expected unless you install optional WebRTC dependencies
+- Frontend shows controls but robot does not move:
+  - Confirm simulator is running
+  - Confirm backend responds at `http://localhost:8000/capabilities`
+- Startup/import issues:
+  - Activate `.venv`
   - Reinstall with `pip install -r requirements.txt`
