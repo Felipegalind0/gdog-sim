@@ -58,7 +58,7 @@
       <!-- Cylinders in URDF align to Z-axis by default, we rotate to roll on Y -->
       <geometry><cylinder radius="{{ wheel_radius }}" length="{{ wheel_width }}"/></geometry>
       <origin xyz="0 0 0" rpy="1.5708 0 0"/> 
-      <material name="dark_grey"><color rgba="0.3 0.3 0.3 1"/></material>
+      <material name="wheel_black"><color rgba="0.02 0.02 0.02 1"/></material>
     </visual>
     <collision>
       <geometry><cylinder radius="{{ wheel_radius }}" length="{{ wheel_width }}"/></geometry>
