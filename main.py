@@ -50,8 +50,8 @@ PID_GAIN_MAX = 2.0
 RESPAWN_SETTLE_STEPS = 20
 COMMAND_BUFFER_MAX = 96
 COMMAND_HISTORY_MAX = 100
-KEYBOARD_VX_CMD = 6.0
-KEYBOARD_YAW_CMD = 1.5
+KEYBOARD_VX_CMD = 24.0
+KEYBOARD_YAW_CMD = 6.0
 MAX_REMOTE_PITCH_SETPOINT_RAD = float(np.deg2rad(12.0))
 MAX_REMOTE_ROLL_SETPOINT_RAD = float(np.deg2rad(12.0))
 CANONICAL_CMD_KEYS = (
@@ -671,54 +671,6 @@ def generate_random_terrain_morph(rng):
     }
 
 
-def add_starry_sky_entities(scene, rng, sun_light_dir, star_count=90, sky_radius=230.0):
-    dirs = rng.normal(size=(star_count, 3))
-    norms = np.linalg.norm(dirs, axis=1, keepdims=True)
-    dirs = dirs / np.clip(norms, 1e-9, None)
-
-    # Slightly cool star tones read better against a black background.
-    for star_idx, d in enumerate(dirs):
-        pos = tuple((d * sky_radius).tolist())
-        radius = float(rng.uniform(0.35, 0.95))
-        star_intensity = float(rng.uniform(0.60, 1.00))
-        color = (
-            min(1.0, star_intensity * float(rng.uniform(0.92, 1.00))),
-            min(1.0, star_intensity * float(rng.uniform(0.93, 1.00))),
-            min(1.0, star_intensity * float(rng.uniform(0.96, 1.00))),
-        )
-        scene.add_entity(
-            gs.morphs.Sphere(
-                pos=pos,
-                radius=radius,
-                fixed=True,
-                collision=False,
-                visualization=True,
-            ),
-            surface=gs.surfaces.Emission(color=color),
-            name=f"sky_star_{star_idx}",
-        )
-
-    sun_dir_vec = np.asarray(sun_light_dir, dtype=np.float64)
-    sun_dir_norm = np.linalg.norm(sun_dir_vec)
-    if sun_dir_norm < 1e-9:
-        sun_dir_vec = np.array([-1.0, -1.0, -1.0], dtype=np.float64)
-        sun_dir_norm = np.linalg.norm(sun_dir_vec)
-    sun_dir_vec = sun_dir_vec / sun_dir_norm
-    sun_pos = tuple((-sun_dir_vec * (sky_radius - 8.0)).tolist())
-
-    scene.add_entity(
-        gs.morphs.Sphere(
-            pos=sun_pos,
-            radius=10.0,
-            fixed=True,
-            collision=False,
-            visualization=True,
-        ),
-        surface=gs.surfaces.Emission(color=(1.0, 0.97, 0.86)),
-        name="sun_disk",
-    )
-
-
 def generate_moon_albedo_texture(rng, size=512):
     # Multi-scale noise creates low-cost moon-like albedo variation.
     coarse_1 = rng.normal(0.0, 1.0, size=(64, 64))
@@ -952,6 +904,7 @@ def main():
             show_world_frame=False,
             show_link_frame=False,
             show_cameras=False,
+            shadow=True,
             plane_reflection=False, 
             background_color=(0.0, 0.0, 0.0),
             ambient_light=(0.25, 0.25, 0.25),
@@ -966,8 +919,6 @@ def main():
         )
     )
 
-    add_starry_sky_entities(scene, rng, sun_light_dir)
-
     terrain_morph, terrain_info = generate_random_terrain_morph(rng)
     moon_albedo = generate_moon_albedo_texture(rng)
     moon_surface = gs.surfaces.Rough(
@@ -977,7 +928,7 @@ def main():
     )
     terrain = scene.add_entity(terrain_morph, surface=moon_surface, name="moon_terrain")
 
-    print("Configured lunar visual theme: starry sky + aligned sun + moon terrain surface")
+    print("Configured lunar visual theme: moon terrain surface + directional sunlight")
 
     print("Generated random terrain configuration:")
     print(f"  n_subterrains: {terrain_info['n_subterrains']}")
@@ -1209,6 +1160,7 @@ def main():
                 "[  / or t ]: open command input",
                 "[  enter  ]: run command",
                 "[   esc   ]: cancel command",
+                "[    h    ]: shadows on/off",
                 "[cmd mode] up/down=history",
                 "[drive] arrows up/down=fwd/back",
                 "[drive] arrows left/right=yaw",
@@ -1417,6 +1369,15 @@ def main():
                 command_buffer = "/" if symbol == pyglet_key.SLASH else ""
                 command_history_idx = None
                 command_history_edit_buffer = command_buffer
+                return True
+
+            if symbol == getattr(pyglet_key, "H", None):
+                render_flags = getattr(pyrender_viewer, "render_flags", None)
+                if isinstance(render_flags, dict) and "shadows" in render_flags:
+                    render_flags["shadows"] = not bool(render_flags["shadows"])
+                    pyrender_viewer.set_message_text(
+                        "Shadows On" if render_flags["shadows"] else "Shadows Off"
+                    )
                 return True
 
             if symbol in (pyglet_key.UP, pyglet_key.DOWN, pyglet_key.LEFT, pyglet_key.RIGHT):
