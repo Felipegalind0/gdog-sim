@@ -1,6 +1,6 @@
 # gdog-sim
 
-![gdog_v1](gdog_v1.png)
+![gdog_v1](gdog_v1.gif)
 
 Wheeled quadruped simulation built with [Genesis](https://github.com/Genesis-Embodied-AI/Genesis), with a remote-control backend and a lunar visual theme.
 
