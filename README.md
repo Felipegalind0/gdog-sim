@@ -9,30 +9,28 @@ Wheeled quadruped simulator built with [Genesis](https://github.com/Genesis-Embo
 - PID-stabilized suspension control
 - Smartphone remote control via [gdog-remote](https://github.com/Felipegalind0/gdog-remote) companion app with WebSocket and optional WebRTC 4 UDP
 
-## How 2 use 
+## Quick Start
 
-### Download source code, install dependencies, and run the sim:
+### Download source code, install dependencies, and run the sim
 
-Clone gh repo:
+Clone repo:
 ```bash
-git clone github.com/Felipegalind0/gdog-sim
+git clone https://github.com/Felipegalind0/gdog-sim
+cd gdog-sim
 ```
 
-create `.venv` if it does not exist:
+Create `.venv` if it does not exist, activate it, and install dependencies:
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install -r requirements.txt
-```
-
-Install dependencies in the venv:
-```bash
-source .venv/bin/activate
+python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
 Run the sim with interactive viewer:
 ```bash
+python main.py --render
+```
 
 ## What This Project Contains
 
@@ -67,11 +65,28 @@ On startup, `main.py` does the following:
 ## Requirements
 
 - Python 3.11
-- Working Genesis-compatible environment (ie ARM64 MacOS )
 - A Python virtual environment (existing `.venv` in this repo is preferred)
+- Upstream Genesis wheel support for your platform
+
+Supported in this repo today:
+
+- macOS arm64
+- Linux x86_64
+
+Not currently supported:
+
+- Linux ARM64 (for example Ubuntu 24 on NVIDIA DGX Spark), because upstream Genesis dependencies are not published for that target yet.
 
 ## Installation
 
+Install simulator dependencies:
+
+```bash
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+```
+
+On Linux ARM64, this install intentionally skips `genesis-world` because upstream packages are unavailable; running the simulator will print a startup message explaining the current platform limitation.
 
 Optional WebRTC support:
 
@@ -287,10 +302,10 @@ The remote app streams controls at 50 Hz and prefers WebRTC data channel when co
 
 ## Dependencies
 
-- `requirements.txt`: aggregate install (includes runtime + Genesis deps)
-- `requirements-runtime.txt`: FastAPI/transport runtime packages
-- `requirements-genesis.txt`: Genesis package
-- `requirements-genesis-deps.txt`: Genesis-related native/python dependency set
+- `requirements.txt`: aggregate install (runtime + Genesis platform marker)
+- `requirements-runtime.txt`: FastAPI/transport + direct Python deps used by this repo
+- `requirements-genesis.txt`: Genesis package (skips Linux ARM64)
+- `requirements-genesis-deps.txt`: legacy explicit Genesis transitive set (not used by default install)
 - `requirements-webrtc-optional.txt`: optional `aiortc`
 
 ## Troubleshooting
@@ -307,3 +322,6 @@ The remote app streams controls at 50 Hz and prefers WebRTC data channel when co
 - Startup/import issues
   - activate `.venv`
   - reinstall with `python -m pip install -r requirements.txt`
+- Linux ARM64 startup exits with Genesis unavailable message
+  - expected on Ubuntu 24 / DGX Spark today due upstream Genesis package availability
+  - use a supported platform (macOS arm64 or Linux x86_64) for now

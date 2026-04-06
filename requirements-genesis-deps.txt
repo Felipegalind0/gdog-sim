@@ -1,3 +1,5 @@
+# Legacy explicit dependency set from Genesis transitive packages.
+# Not used by default install; prefer requirements.txt.
 black
 coacd
 freetype-py
@@ -19,6 +21,6 @@ PyOpenGL
 scikit-image
 screeninfo
 six
-taichi
-tetgen
+taichi; platform_system != "Linux" or (platform_machine != "aarch64" and platform_machine != "arm64")
+tetgen; platform_system != "Linux" or (platform_machine != "aarch64" and platform_machine != "arm64")
 jinja2

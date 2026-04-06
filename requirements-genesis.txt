@@ -1,1 +1,3 @@
-genesis-world
+# Genesis wheels are currently unavailable on Linux ARM64 (for example DGX Spark).
+# Keep this marker so `pip install -r requirements.txt` stays actionable on that platform.
+genesis-world; platform_system != "Linux" or (platform_machine != "aarch64" and platform_machine != "arm64")

@@ -10,8 +10,19 @@ import threading
 import time
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
-import genesis as gs
 import numpy as np
+
+try:
+    import genesis as gs
+except ModuleNotFoundError as exc:
+    if exc.name in {"genesis", "quadrants", "gstaichi", "taichi"}:
+        raise SystemExit(
+            "Genesis is unavailable in this environment. "
+            "Install with 'python -m pip install -r requirements.txt' on a supported platform. "
+            "Linux ARM64 (for example Ubuntu 24 on DGX Spark) is currently unsupported by upstream "
+            "Genesis dependencies."
+        ) from exc
+    raise
 
 from camera_controller import FollowCameraController
 from commands import CommandState, _execute_suspension_command
