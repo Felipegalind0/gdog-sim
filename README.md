@@ -78,6 +78,12 @@ Deterministic randomized world:
 python main.py --render --seed 12345
 ```
 
+Custom backend bind host/port:
+
+```bash
+python main.py --render --host 0.0.0.0 --port 8000
+```
+
 Fixed-length run:
 
 ```bash
@@ -97,6 +103,58 @@ python main.py --video
 ```
 
 Video mode writes `wheeled_go2.mp4` (50 FPS) when the run completes.
+
+### Cloudflare Quick Tunnel (No API Token)
+
+If you want to use the HTTPS GitHub Pages remote with your local simulator backend, run an ephemeral Cloudflare Quick Tunnel.
+
+Install once (macOS):
+
+```bash
+brew install cloudflared
+```
+
+Then launch sim with tunnel:
+
+```bash
+python main.py --render --quick-tunnel
+```
+
+If your network is slow to provision the quick tunnel URL, increase wait time:
+
+```bash
+python main.py --render --quick-tunnel --quick-tunnel-timeout 60
+```
+
+On startup, the simulator prints:
+
+- local backend targets (`<ip>:8000`)
+- tunnel backend target (for example `https://random-name.trycloudflare.com`)
+- a prefilled remote link (for example `https://felipegalind0.github.io/gdog-remote?backend=https://...`)
+- a terminal QR code for that prefilled link
+
+If terminal QR rendering dependency is missing, startup prints a fallback QR image URL instead.
+
+Paste the printed tunnel URL into gdog-remote backend input when using GitHub Pages.
+
+Notes:
+
+- Cloudflare Quick Tunnel does not require an API key/token for this flow
+- URL is temporary and usually changes each run
+
+Useful options:
+
+- `--remote-url <url>`: override remote page URL (default is hardcoded to `https://felipegalind0.github.io/gdog-remote`)
+- `--no-qr`: print link only, disable terminal QR rendering
+- `--quick-tunnel-timeout <seconds>`: wait longer for tunnel URL discovery
+
+If quick tunnel URL discovery still times out in the simulator, run cloudflared manually in a second terminal:
+
+```bash
+cloudflared tunnel --url http://127.0.0.1:8000 --no-autoupdate
+```
+
+Then copy the `https://...trycloudflare.com` URL from that terminal into gdog-remote backend input.
 
 ### Step Defaults
 
