@@ -3,7 +3,36 @@
 ![gdog_v1](gdog_v1.gif)
 
 Wheeled quadruped simulator built with [Genesis](https://github.com/Genesis-Embodied-AI/Genesis).
-The simulation randomizes robot morphology and terrain each run, provides a viewer-side command console for suspension tuning, and accepts remote drive commands over WebSocket (with optional WebRTC).
+
+- randomized robot morphology and terrain 
+- photo-realistic rendering with dynamic shadows
+- PID-stabilized suspension control
+- Smartphone remote control via [gdog-remote](https://github.com/Felipegalind0/gdog-remote) companion app with WebSocket and optional WebRTC 4 UDP
+
+## How 2 use 
+
+### Download source code, install dependencies, and run the sim:
+
+Clone gh repo:
+```bash
+git clone github.com/Felipegalind0/gdog-sim
+```
+
+create `.venv` if it does not exist:
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+```
+
+Install dependencies in the venv:
+```bash
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+```
+
+Run the sim with interactive viewer:
+```bash
 
 ## What This Project Contains
 
@@ -37,18 +66,12 @@ On startup, `main.py` does the following:
 
 ## Requirements
 
-- Python 3.10+
-- Working Genesis-compatible environment (macOS Apple Silicon is a common target)
+- Python 3.11
+- Working Genesis-compatible environment (ie ARM64 MacOS )
 - A Python virtual environment (existing `.venv` in this repo is preferred)
 
 ## Installation
 
-Use the existing `.venv` if present:
-
-```bash
-source .venv/bin/activate
-python -m pip install -r requirements.txt
-```
 
 Optional WebRTC support:
 
@@ -56,13 +79,6 @@ Optional WebRTC support:
 python -m pip install -r requirements-webrtc-optional.txt
 ```
 
-Create `.venv` only if it does not exist:
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements.txt
-```
 
 ## Running
 
