@@ -102,6 +102,15 @@ docker run --rm -p 8000:8000 --gpus all \
   -v /tmp/.X11-unix:/tmp/.X11-unix:rw \
   gdog-sim python main.py --render --host 0.0.0.0
 ```
+
+> **Note on Ubuntu 24 & Wayland:** Ubuntu 24 defaults to Wayland, even on modern NVIDIA drivers. If `echo $XDG_SESSION_TYPE` returns `wayland`, the X11 bridge above relies on Xwayland and might have hardware acceleration penalties. To pass Wayland natively, use:
+> ```bash
+> docker run --rm -p 8000:8000 --gpus all \
+>   -e WAYLAND_DISPLAY=$WAYLAND_DISPLAY \
+>   -e XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR \
+>   -v $XDG_RUNTIME_DIR/$WAYLAND_DISPLAY:$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY:rw \
+>   gdog-sim python main.py --render --host 0.0.0.0
+> ```
 *(If your cluster uses Apptainer/Singularity or Podman instead of Docker, the same Dockerfile will compile correctly).*
 
 **Option 2: Use the provided automated build script**
