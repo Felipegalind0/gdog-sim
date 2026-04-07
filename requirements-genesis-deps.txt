@@ -21,6 +21,6 @@ PyOpenGL
 scikit-image
 screeninfo
 six
-taichi; platform_system != "Linux" or (platform_machine != "aarch64" and platform_machine != "arm64")
-tetgen; platform_system != "Linux" or (platform_machine != "aarch64" and platform_machine != "arm64")
+taichi
+tetgen
 jinja2

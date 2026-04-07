@@ -72,10 +72,7 @@ Supported in this repo today:
 
 - macOS arm64
 - Linux x86_64
-
-Not currently supported:
-
-- Linux ARM64 (for example Ubuntu 24 on NVIDIA DGX Spark), because upstream Genesis dependencies are not published for that target yet.
+- Linux ARM64 (for example Ubuntu 24 on NVIDIA DGX Spark) via custom compile script
 
 ## Installation
 
@@ -86,7 +83,13 @@ source .venv/bin/activate
 python -m pip install -r requirements.txt
 ```
 
-On Linux ARM64, this install intentionally skips `genesis-world` because upstream packages are unavailable; running the simulator will print a startup message explaining the current platform limitation.
+### Linux ARM64 (NVIDIA DGX Spark / Ubuntu 24)
+
+Since upstream Genesis binaries (`quadrants`, etc.) are missing for Linux ARM64, you must compile them from source. We provide a one-click automated build script for Debian/Ubuntu distributions:
+
+```bash
+./scripts/install_ubuntu_arm64.sh
+```
 
 Optional WebRTC support:
 
@@ -323,5 +326,4 @@ The remote app streams controls at 50 Hz and prefers WebRTC data channel when co
   - activate `.venv`
   - reinstall with `python -m pip install -r requirements.txt`
 - Linux ARM64 startup exits with Genesis unavailable message
-  - expected on Ubuntu 24 / DGX Spark today due upstream Genesis package availability
-  - use a supported platform (macOS arm64 or Linux x86_64) for now
+  - Run `./scripts/install_ubuntu_arm64.sh` to compile the missing binaries.

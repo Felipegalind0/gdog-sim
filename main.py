@@ -19,8 +19,7 @@ except ModuleNotFoundError as exc:
         raise SystemExit(
             "Genesis is unavailable in this environment. "
             "Install with 'python -m pip install -r requirements.txt' on a supported platform. "
-            "Linux ARM64 (for example Ubuntu 24 on DGX Spark) is currently unsupported by upstream "
-            "Genesis dependencies."
+            "If you are on Linux ARM64 (e.g., Ubuntu 24 DGX Spark), run `./scripts/install_ubuntu_arm64.sh` to compile missing binaries from source."
         ) from exc
     raise
 
