@@ -85,7 +85,19 @@ python -m pip install -r requirements.txt
 
 ### Linux ARM64 (NVIDIA DGX Spark / Ubuntu 24)
 
-Since upstream Genesis binaries (`quadrants`, etc.) are missing for Linux ARM64, you must compile them from source. We provide a one-click automated build script for Debian/Ubuntu distributions:
+Since upstream Genesis binaries (`quadrants`, etc.) are missing for Linux ARM64, you must compile them from source. 
+
+**Option 1: Build with Docker (Recommended for DGX/HPC clusters)**
+If you do not have `sudo` privileges on the machine, you can run everything inside a container:
+
+```bash
+docker build -t gdog-sim .
+docker run --rm -p 8000:8000 --gpus all gdog-sim python main.py --render --host 0.0.0.0
+```
+*(If your cluster uses Apptainer/Singularity or Podman instead of Docker, the same Dockerfile will compile correctly).*
+
+**Option 2: Use the provided automated build script**
+If you have local `sudo` access, you can use our one-click script for Debian/Ubuntu distributions:
 
 ```bash
 ./scripts/install_ubuntu_arm64.sh
