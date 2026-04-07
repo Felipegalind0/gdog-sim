@@ -92,7 +92,15 @@ If you do not have `sudo` privileges on the machine, you can run everything insi
 
 ```bash
 docker build -t gdog-sim .
-docker run --rm -p 8000:8000 --gpus all gdog-sim python main.py --render --host 0.0.0.0
+
+# Allow local Docker to connect to your X11 display
+xhost +local:docker
+
+# Run the container with GPU access and X11 GUI passthrough
+docker run --rm -p 8000:8000 --gpus all \
+  -e DISPLAY=$DISPLAY \
+  -v /tmp/.X11-unix:/tmp/.X11-unix:rw \
+  gdog-sim python main.py --render --host 0.0.0.0
 ```
 *(If your cluster uses Apptainer/Singularity or Podman instead of Docker, the same Dockerfile will compile correctly).*
 
