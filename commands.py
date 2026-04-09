@@ -36,6 +36,8 @@ class CommandState:
         self.voice_cmd = None
         self.voice_direction = None
         self.voice_amount = 0.0
+        self.voice_call_id = None
+        self.outgoing_messages = []
 
     def update(
         self,
@@ -50,6 +52,7 @@ class CommandState:
         voice_cmd=None,
         voice_direction=None,
         voice_amount=0.0,
+        voice_call_id=None,
     ):
         with self._lock:
             self.vx = vx
@@ -65,6 +68,7 @@ class CommandState:
             self.voice_cmd = voice_cmd
             self.voice_direction = voice_direction
             self.voice_amount = voice_amount
+            self.voice_call_id = None if voice_call_id is None else str(voice_call_id)
 
     def get(self):
         with self._lock:
@@ -80,6 +84,7 @@ class CommandState:
                 self.voice_cmd,
                 self.voice_direction,
                 self.voice_amount,
+                self.voice_call_id,
             )
             self.cam_dx = 0.0
             self.cam_dy = 0.0
@@ -88,6 +93,21 @@ class CommandState:
             self.voice_cmd = None
             self.voice_direction = None
             self.voice_amount = 0.0
+            self.voice_call_id = None
+            return out
+
+    def push_outgoing(self, payload):
+        if payload is None:
+            return
+        with self._lock:
+            self.outgoing_messages.append(payload)
+
+    def pop_outgoing_all(self):
+        with self._lock:
+            if not self.outgoing_messages:
+                return []
+            out = list(self.outgoing_messages)
+            self.outgoing_messages.clear()
             return out
 
     def push_command(self, txt_cmd):

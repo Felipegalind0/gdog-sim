@@ -71,15 +71,49 @@ COMMAND_BUFFER_MAX = 96
 COMMAND_HISTORY_MAX = 100
 KEYBOARD_VX_CMD = 24.0
 KEYBOARD_YAW_CMD = -8.0
+ROTATE_ONLY_VX_DEADBAND = 0.15
+ROTATE_ONLY_OMEGA_MIN = 0.10
+ROTATE_DRIFT_KP = 24.0
+ROTATE_DRIFT_KI = 6.0
+ROTATE_DRIFT_KD = 3.0
+ROTATE_DRIFT_I_LIMIT = 0.30
+ROTATE_DRIFT_MAX_CORRECTION = 7.0
+DRIVE_VX_ACCEL_LIMIT = 40.0
+DRIVE_VX_DECEL_LIMIT = 55.0
+DRIVE_STATE_FILTER_ALPHA = 0.25
+TRACTION_NEUTRAL_SPEED_MPS = 0.15
+TRACTION_NEUTRAL_CMD = 0.5
+TRACTION_NEUTRAL_PITCH_ALPHA = 0.02
+TRACTION_PITCH_WARN_RAD = float(np.deg2rad(7.0))
+TRACTION_PITCH_BLOCK_RAD = float(np.deg2rad(14.0))
+TRACTION_PITCH_RATE_WARN_RAD_S = float(np.deg2rad(40.0))
+TRACTION_PITCH_RATE_BLOCK_RAD_S = float(np.deg2rad(130.0))
+TRACTION_CMD_ACCEL_WARN = 10.0
+TRACTION_CMD_ACCEL_BLOCK = 45.0
+TRACTION_RISK_START = 0.35
+TRACTION_RISK_HARD_BLOCK = 0.90
+TRACTION_MIN_SCALE = 0.05
+ANTI_TIP_BALANCE_ACCEL_REF = 25.0
+ANTI_TIP_PITCH_DAMP_GAIN = 0.18
+ANTI_TIP_PITCH_RESTORE_GAIN = 0.55
+ANTI_TIP_RISK_BOOST_GAIN = 0.60
+ANTI_TIP_MAX_SETPOINT_BIAS_RAD = float(np.deg2rad(8.0))
 MAX_REMOTE_PITCH_SETPOINT_RAD = float(np.deg2rad(12.0))
 MAX_REMOTE_ROLL_SETPOINT_RAD = float(np.deg2rad(12.0))
 VOICE_PWM_PERIOD_STEPS = 10
 VOICE_MOVE_STOP_TOL_M = 0.02
 VOICE_MOVE_PULSE_NEAR_M = 0.10
 VOICE_MOVE_PULSE_MID_M = 0.30
+VOICE_MOVE_MAX_LATERAL_ERROR_M = 0.30
 VOICE_ROT_STOP_TOL_RAD = float(np.deg2rad(2.0))
 VOICE_ROT_PULSE_NEAR_RAD = float(np.deg2rad(8.0))
 VOICE_ROT_PULSE_MID_RAD = float(np.deg2rad(24.0))
+VOICE_TASK_TIP_PITCH_RAD = float(np.deg2rad(60.0))
+VOICE_TASK_TIP_ROLL_RAD = float(np.deg2rad(60.0))
+VOICE_MOVE_TIMEOUT_MIN_S = 4.0
+VOICE_MOVE_TIMEOUT_PER_M_S = 8.0
+VOICE_ROT_TIMEOUT_MIN_S = 4.0
+VOICE_ROT_TIMEOUT_PER_RAD_S = 5.0
 DEFAULT_BACKEND_HOST = "0.0.0.0"
 DEFAULT_BACKEND_PORT = 8000
 DEFAULT_QUICK_TUNNEL_STARTUP_TIMEOUT_SEC = 20.0
@@ -616,14 +650,60 @@ def main():
 
     active_voice_task = None
     voice_pwm_tick = 0
+    prev_pos_xy = None
+    prev_pitch = None
+    pitch_neutral = 0.0
+    filtered_forward_speed = 0.0
+    filtered_pitch_rate = 0.0
+    vx_cmd_smooth = 0.0
+    rotate_hold_active = False
+    rotate_hold_anchor_xy = np.zeros(2, dtype=float)
+    rotate_hold_integral = 0.0
+    rotate_drift_err_m = 0.0
+    rotate_drift_correction = 0.0
+    front_unload_risk = 0.0
+    traction_scale = 1.0
+    front_traction_blocked = False
+    forward_accel_cmd = 0.0
+    forward_speed_meas = 0.0
+    pitch_rate_meas = 0.0
+    anti_tip_pitch_bias = 0.0
+
+    def _emit_voice_command_result(call_id, command, status, reason="", **extra):
+        call_id_text = str(call_id or "").strip()
+        if not call_id_text:
+            return
+
+        payload = {
+            "type": "voice_command_result",
+            "call_id": call_id_text,
+            "command": str(command),
+            "status": str(status),
+        }
+        if reason:
+            payload["reason"] = str(reason)
+        payload.update(extra)
+        state.push_outgoing(payload)
+
+    def _finish_active_voice_task(task, status, reason="", **extra):
+        if task is None:
+            return None
+        _emit_voice_command_result(
+            call_id=task.get("call_id"),
+            command=task.get("type", "unknown"),
+            status=status,
+            reason=reason,
+            **extra,
+        )
+        return None
 
     try:
         i = 0
         while steps <= 0 or i < steps:
-            vx, omega, pitch_cmd, roll_cmd, cam_dx, cam_dy, cam_zoom, text_cmds, voice_cmd, voice_direction, voice_amount = state.get()
+            vx, omega, pitch_cmd, roll_cmd, cam_dx, cam_dy, cam_zoom, text_cmds, voice_cmd, voice_direction, voice_amount, voice_call_id = state.get()
 
-            pitch_pid.setpoint = float(np.clip(pitch_cmd, -1.0, 1.0)) * MAX_REMOTE_PITCH_SETPOINT_RAD
-            roll_pid.setpoint = float(np.clip(roll_cmd, -1.0, 1.0)) * MAX_REMOTE_ROLL_SETPOINT_RAD
+            remote_pitch_setpoint = float(np.clip(pitch_cmd, -1.0, 1.0)) * MAX_REMOTE_PITCH_SETPOINT_RAD
+            remote_roll_setpoint = float(np.clip(roll_cmd, -1.0, 1.0)) * MAX_REMOTE_ROLL_SETPOINT_RAD
 
             kb_up, kb_down, kb_left, kb_right = camera_controller.get_keyboard_drive_flags()
 
@@ -643,11 +723,39 @@ def main():
 
             curr_forward_xy = np.asarray(_forward_xy_from_quat_wxyz(robot.get_quat()), dtype=float)
             curr_heading = float(np.arctan2(curr_forward_xy[1], curr_forward_xy[0]))
+            roll, pitch = _roll_pitch_from_quat_wxyz(robot.get_quat())
+
+            if prev_pos_xy is None:
+                prev_pos_xy = curr_pos[:2].copy()
+            if prev_pitch is None:
+                prev_pitch = float(pitch)
+                pitch_neutral = float(pitch)
+
+            delta_pos_xy = curr_pos[:2] - prev_pos_xy
+            forward_speed_raw = float(np.dot(delta_pos_xy / sim_dt, curr_forward_xy))
+            filtered_forward_speed += DRIVE_STATE_FILTER_ALPHA * (forward_speed_raw - filtered_forward_speed)
+            forward_speed_meas = float(filtered_forward_speed)
+
+            pitch_rate_raw = float((pitch - prev_pitch) / sim_dt)
+            filtered_pitch_rate += DRIVE_STATE_FILTER_ALPHA * (pitch_rate_raw - filtered_pitch_rate)
+            pitch_rate_meas = float(filtered_pitch_rate)
+
+            prev_pos_xy = curr_pos[:2].copy()
+            prev_pitch = float(pitch)
 
             received_voice_cmd = str(voice_cmd).strip().lower() if voice_cmd else ""
             if received_voice_cmd == "stop":
-                active_voice_task = None
+                active_voice_task = _finish_active_voice_task(
+                    active_voice_task,
+                    status="failed",
+                    reason="Command was stopped before completion.",
+                )
             elif received_voice_cmd in ("move", "rotate"):
+                active_voice_task = _finish_active_voice_task(
+                    active_voice_task,
+                    status="failed",
+                    reason="Superseded by a newer voice command.",
+                )
                 requested_dir = str(voice_direction or "").strip().lower()
                 requested_amt = max(float(voice_amount), 0.0)
 
@@ -663,14 +771,28 @@ def main():
                         move_sign = -1.0
 
                     if move_sign != 0.0:
+                        timeout_s = max(
+                            VOICE_MOVE_TIMEOUT_MIN_S,
+                            float(requested_amt) * VOICE_MOVE_TIMEOUT_PER_M_S,
+                        )
                         active_voice_task = {
                             "type": "move",
                             "dir_sign": move_sign,
                             "target": requested_amt,
                             "start_pos_xy": curr_pos[:2].copy(),
                             "start_forward_xy": curr_forward_xy.copy(),
+                            "call_id": voice_call_id,
+                            "started_at": float(time.monotonic()),
+                            "timeout_s": timeout_s,
                         }
                         voice_pwm_tick = 0
+                    else:
+                        _emit_voice_command_result(
+                            call_id=voice_call_id,
+                            command="move",
+                            status="failed",
+                            reason="Invalid move direction. Use 'forward' or 'backward'.",
+                        )
 
                 elif received_voice_cmd == "rotate" and requested_amt > 0.0:
                     yaw_sign = 0.0
@@ -680,23 +802,78 @@ def main():
                         yaw_sign = -1.0
 
                     if yaw_sign != 0.0:
+                        timeout_s = max(
+                            VOICE_ROT_TIMEOUT_MIN_S,
+                            float(requested_amt) * VOICE_ROT_TIMEOUT_PER_RAD_S,
+                        )
                         active_voice_task = {
                             "type": "rotate",
                             "dir_sign": yaw_sign,
                             "target": requested_amt,
                             "progress": 0.0,
                             "prev_heading": curr_heading,
+                            "call_id": voice_call_id,
+                            "started_at": float(time.monotonic()),
+                            "timeout_s": timeout_s,
                         }
                         voice_pwm_tick = 0
+                    else:
+                        _emit_voice_command_result(
+                            call_id=voice_call_id,
+                            command="rotate",
+                            status="failed",
+                            reason="Invalid rotate direction. Use 'left' or 'right'.",
+                        )
+                else:
+                    _emit_voice_command_result(
+                        call_id=voice_call_id,
+                        command=received_voice_cmd,
+                        status="failed",
+                        reason="Invalid command amount. Value must be positive.",
+                    )
 
             if manual_input and not received_voice_cmd:
-                active_voice_task = None
+                active_voice_task = _finish_active_voice_task(
+                    active_voice_task,
+                    status="failed",
+                    reason="Cancelled by manual control input.",
+                )
+
+            if active_voice_task is not None:
+                tipped = abs(float(pitch)) >= VOICE_TASK_TIP_PITCH_RAD or abs(float(roll)) >= VOICE_TASK_TIP_ROLL_RAD
+                if tipped:
+                    active_voice_task = _finish_active_voice_task(
+                        active_voice_task,
+                        status="failed",
+                        reason=(
+                            f"Robot tipped over (pitch={np.degrees(pitch):+.1f} deg, "
+                            f"roll={np.degrees(roll):+.1f} deg)."
+                        ),
+                        pitch_deg=float(np.degrees(pitch)),
+                        roll_deg=float(np.degrees(roll)),
+                    )
+                    vx = 0.0
+                    omega = 0.0
 
             if kb_up or kb_down or kb_left or kb_right:
                 fwd_sign = (1.0 if kb_up else 0.0) - (1.0 if kb_down else 0.0)
                 yaw_sign = (1.0 if kb_right else 0.0) - (1.0 if kb_left else 0.0)
                 vx = fwd_sign * KEYBOARD_VX_CMD
                 omega = yaw_sign * KEYBOARD_YAW_CMD
+
+            if active_voice_task is not None:
+                elapsed_s = float(time.monotonic() - float(active_voice_task.get("started_at", 0.0)))
+                timeout_s = float(active_voice_task.get("timeout_s", VOICE_MOVE_TIMEOUT_MIN_S))
+                if elapsed_s > timeout_s:
+                    active_voice_task = _finish_active_voice_task(
+                        active_voice_task,
+                        status="failed",
+                        reason="Command timed out before completion.",
+                        elapsed_s=elapsed_s,
+                        timeout_s=timeout_s,
+                    )
+                    vx = 0.0
+                    omega = 0.0
 
             if active_voice_task is not None:
                 voice_pwm_tick += 1
@@ -707,9 +884,35 @@ def main():
                     progress = float(np.dot(displacement_xy, active_voice_task["start_forward_xy"]))
                     progress *= float(active_voice_task["dir_sign"])
                     remaining = float(active_voice_task["target"]) - progress
+                    lateral_axis_xy = np.array(
+                        [
+                            -float(active_voice_task["start_forward_xy"][1]),
+                            float(active_voice_task["start_forward_xy"][0]),
+                        ],
+                        dtype=float,
+                    )
+                    lateral_error_m = abs(float(np.dot(displacement_xy, lateral_axis_xy)))
 
                     if remaining <= VOICE_MOVE_STOP_TOL_M:
-                        active_voice_task = None
+                        if lateral_error_m <= VOICE_MOVE_MAX_LATERAL_ERROR_M:
+                            active_voice_task = _finish_active_voice_task(
+                                active_voice_task,
+                                status="completed",
+                                progress_m=float(progress),
+                                target_m=float(active_voice_task["target"]),
+                                remaining_m=float(max(remaining, 0.0)),
+                                lateral_error_m=float(lateral_error_m),
+                            )
+                        else:
+                            active_voice_task = _finish_active_voice_task(
+                                active_voice_task,
+                                status="failed",
+                                reason="Robot reached the wrong destination (path deviation too large).",
+                                progress_m=float(progress),
+                                target_m=float(active_voice_task["target"]),
+                                remaining_m=float(max(remaining, 0.0)),
+                                lateral_error_m=float(lateral_error_m),
+                            )
                         vx = 0.0
                         omega = 0.0
                     else:
@@ -731,7 +934,13 @@ def main():
                     remaining = float(active_voice_task["target"]) - float(active_voice_task["progress"])
 
                     if remaining <= VOICE_ROT_STOP_TOL_RAD:
-                        active_voice_task = None
+                        active_voice_task = _finish_active_voice_task(
+                            active_voice_task,
+                            status="completed",
+                            progress_rad=float(active_voice_task["progress"]),
+                            target_rad=float(active_voice_task["target"]),
+                            remaining_rad=float(max(remaining, 0.0)),
+                        )
                         vx = 0.0
                         omega = 0.0
                     else:
@@ -772,19 +981,178 @@ def main():
                 debug_speed_enabled = bool(debug_flags["debug_speed"])
 
             if do_respawn:
+                active_voice_task = _finish_active_voice_task(
+                    active_voice_task,
+                    status="failed",
+                    reason="Robot was respawned before command completion.",
+                )
                 robot.set_qpos(spawn_qs.copy())
                 pitch_pid.reset()
                 roll_pid.reset()
                 respawn_settle_steps = RESPAWN_SETTLE_STEPS
-                active_voice_task = None
                 state.update(0.0, 0.0)
                 vx = 0.0
                 omega = 0.0
+                vx_cmd_smooth = 0.0
+                rotate_hold_active = False
+                rotate_hold_integral = 0.0
+                rotate_drift_err_m = 0.0
+                rotate_drift_correction = 0.0
+                front_unload_risk = 0.0
+                traction_scale = 1.0
+                front_traction_blocked = False
+                forward_accel_cmd = 0.0
+                anti_tip_pitch_bias = 0.0
+                prev_pos_xy = np.asarray(spawn_qs[0:2], dtype=float)
+                prev_pitch = 0.0
+                pitch_neutral = 0.0
+                filtered_forward_speed = 0.0
+                filtered_pitch_rate = 0.0
+                roll = 0.0
+                pitch = 0.0
 
-            # 1. Simulated IMU state extraction from base orientation.
-            roll, pitch = _roll_pitch_from_quat_wxyz(robot.get_quat())
+            vx_cmd_raw = float(vx)
+            omega_cmd_raw = float(omega)
 
-            # 2. PID roll/pitch stabilization outputs desired per-side Z adjustments.
+            rotate_only_requested = (
+                abs(omega_cmd_raw) > ROTATE_ONLY_OMEGA_MIN
+                and abs(vx_cmd_raw) < ROTATE_ONLY_VX_DEADBAND
+            )
+
+            if rotate_only_requested:
+                if not rotate_hold_active:
+                    rotate_hold_active = True
+                    rotate_hold_anchor_xy = curr_pos[:2].copy()
+                    rotate_hold_integral = 0.0
+
+                rotate_drift_err_m = float(np.dot(curr_pos[:2] - rotate_hold_anchor_xy, curr_forward_xy))
+                rotate_hold_integral = float(
+                    np.clip(
+                        rotate_hold_integral + rotate_drift_err_m * sim_dt,
+                        -ROTATE_DRIFT_I_LIMIT,
+                        ROTATE_DRIFT_I_LIMIT,
+                    )
+                )
+                rotate_drift_correction = float(
+                    np.clip(
+                        -(
+                            ROTATE_DRIFT_KP * rotate_drift_err_m
+                            + ROTATE_DRIFT_KI * rotate_hold_integral
+                            + ROTATE_DRIFT_KD * forward_speed_meas
+                        ),
+                        -ROTATE_DRIFT_MAX_CORRECTION,
+                        ROTATE_DRIFT_MAX_CORRECTION,
+                    )
+                )
+            else:
+                rotate_hold_active = False
+                rotate_hold_anchor_xy = curr_pos[:2].copy()
+                rotate_hold_integral = 0.0
+                rotate_drift_err_m = 0.0
+                rotate_drift_correction = 0.0
+
+            vx_cmd_after_rotate = float(vx_cmd_raw + rotate_drift_correction)
+
+            prev_vx_cmd_smooth = float(vx_cmd_smooth)
+            vx_target_delta = vx_cmd_after_rotate - prev_vx_cmd_smooth
+            if np.sign(vx_cmd_after_rotate) == np.sign(prev_vx_cmd_smooth):
+                if abs(vx_cmd_after_rotate) > abs(prev_vx_cmd_smooth):
+                    max_vx_step = DRIVE_VX_ACCEL_LIMIT * sim_dt
+                else:
+                    max_vx_step = DRIVE_VX_DECEL_LIMIT * sim_dt
+            else:
+                max_vx_step = DRIVE_VX_DECEL_LIMIT * sim_dt
+
+            vx_cmd_smooth = prev_vx_cmd_smooth + float(np.clip(vx_target_delta, -max_vx_step, max_vx_step))
+            forward_accel_cmd = float((vx_cmd_smooth - prev_vx_cmd_smooth) / sim_dt)
+
+            if abs(forward_speed_meas) < TRACTION_NEUTRAL_SPEED_MPS and abs(vx_cmd_smooth) < TRACTION_NEUTRAL_CMD:
+                pitch_neutral = float(
+                    (1.0 - TRACTION_NEUTRAL_PITCH_ALPHA) * pitch_neutral
+                    + TRACTION_NEUTRAL_PITCH_ALPHA * pitch
+                )
+            dynamic_pitch = float(pitch - pitch_neutral)
+
+            pitch_risk = float(
+                np.clip(
+                    (abs(dynamic_pitch) - TRACTION_PITCH_WARN_RAD)
+                    / max(TRACTION_PITCH_BLOCK_RAD - TRACTION_PITCH_WARN_RAD, 1e-6),
+                    0.0,
+                    1.0,
+                )
+            )
+            pitch_rate_risk = float(
+                np.clip(
+                    (abs(pitch_rate_meas) - TRACTION_PITCH_RATE_WARN_RAD_S)
+                    / max(TRACTION_PITCH_RATE_BLOCK_RAD_S - TRACTION_PITCH_RATE_WARN_RAD_S, 1e-6),
+                    0.0,
+                    1.0,
+                )
+            )
+            cmd_accel_risk = float(
+                np.clip(
+                    (abs(forward_accel_cmd) - TRACTION_CMD_ACCEL_WARN)
+                    / max(TRACTION_CMD_ACCEL_BLOCK - TRACTION_CMD_ACCEL_WARN, 1e-6),
+                    0.0,
+                    1.0,
+                )
+            )
+
+            moving_or_driving = (
+                abs(forward_speed_meas) > TRACTION_NEUTRAL_SPEED_MPS
+                or abs(vx_cmd_smooth) > TRACTION_NEUTRAL_CMD
+            )
+            if moving_or_driving:
+                front_unload_risk = float(0.55 * pitch_risk + 0.25 * pitch_rate_risk + 0.20 * cmd_accel_risk)
+            else:
+                front_unload_risk = 0.0
+
+            traction_scale = 1.0
+            if front_unload_risk > TRACTION_RISK_START:
+                traction_scale = float(
+                    np.clip(
+                        1.0 - (front_unload_risk - TRACTION_RISK_START) / max(1.0 - TRACTION_RISK_START, 1e-6),
+                        TRACTION_MIN_SCALE,
+                        1.0,
+                    )
+                )
+
+            front_traction_blocked = bool(
+                front_unload_risk >= TRACTION_RISK_HARD_BLOCK
+                and abs(vx_cmd_smooth) > TRACTION_NEUTRAL_CMD
+            )
+            vx_cmd_limited = float(vx_cmd_smooth * traction_scale)
+            if front_traction_blocked:
+                vx_cmd_limited = 0.0
+
+            balance_gain = float(np.clip(abs(forward_accel_cmd) / ANTI_TIP_BALANCE_ACCEL_REF, 0.0, 1.0))
+            balance_gain = max(balance_gain, front_unload_risk)
+            anti_tip_pitch_bias = -(
+                ANTI_TIP_PITCH_DAMP_GAIN * pitch_rate_meas
+                + ANTI_TIP_PITCH_RESTORE_GAIN * dynamic_pitch
+            )
+            anti_tip_pitch_bias *= balance_gain * (1.0 + ANTI_TIP_RISK_BOOST_GAIN * front_unload_risk)
+            anti_tip_pitch_bias = float(
+                np.clip(
+                    anti_tip_pitch_bias,
+                    -ANTI_TIP_MAX_SETPOINT_BIAS_RAD,
+                    ANTI_TIP_MAX_SETPOINT_BIAS_RAD,
+                )
+            )
+
+            vx = vx_cmd_limited
+            omega = omega_cmd_raw
+
+            pitch_pid.setpoint = float(
+                np.clip(
+                    remote_pitch_setpoint + anti_tip_pitch_bias,
+                    -MAX_REMOTE_PITCH_SETPOINT_RAD,
+                    MAX_REMOTE_PITCH_SETPOINT_RAD,
+                )
+            )
+            roll_pid.setpoint = remote_roll_setpoint
+
+            # 1. PID roll/pitch stabilization outputs desired per-side Z adjustments.
             pitch_delta_z = 0.0
             roll_delta_z = 0.0
             target_leg_pos = standing_leg_pos.copy()
@@ -798,7 +1166,7 @@ def main():
                 pitch_delta_z = pitch_mix_sign * pitch_pid_output
                 roll_delta_z = roll_mix_sign * roll_pid_output
 
-                # 3. Mix pitch and roll corrections into each leg target.
+                # 2. Mix pitch and roll corrections into each leg target.
                 leg_delta_z = {
                     "fl": pitch_delta_z - roll_delta_z,
                     "fr": pitch_delta_z + roll_delta_z,
@@ -819,10 +1187,10 @@ def main():
                     target_leg_pos[leg_dof_to_local_idx[hip_dof]] = hip_angle
                     target_leg_pos[leg_dof_to_local_idx[knee_dof]] = knee_angle
 
-            # 4. Apply leg position control from the suspension IK.
+            # 3. Apply leg position control from the suspension IK.
             robot.control_dofs_position(target_leg_pos, dofs_idx_local=leg_dofs)
         
-            # 5. Calculate skid-steer kinematics:
+            # 4. Calculate skid-steer kinematics:
             left_vel = vx - omega
             right_vel = vx + omega
 
@@ -838,13 +1206,17 @@ def main():
                     # Fallback for unexpected naming: keep translational command.
                     target_wheel_vel[j] = vx
 
-            # 6. Drive the wheels with velocity control
+            # 5. Drive the wheels with velocity control
             robot.control_dofs_velocity(target_wheel_vel, dofs_idx_local=wheel_dofs)
 
             hud_status_text = (
                 f"Susp {'ON' if suspension_enabled else 'OFF'}\n"
                 f"P {np.degrees(pitch):+.1f}deg  R {np.degrees(roll):+.1f}deg"
             )
+            if front_traction_blocked:
+                hud_status_text += "\nFront traction: BLOCK"
+            elif traction_scale < 0.999:
+                hud_status_text += f"\nFront traction: {traction_scale * 100.0:.0f}%"
             if camera_controller.is_ctrl_held():
                 hud_status_text += (
                     f"\nCam target z {camera_controller.camera_center_height_offset:+.3f} m"
@@ -909,8 +1281,19 @@ def main():
                 debug_lines.extend(
                     [
                         "[Speed Debug]",
+                        f" vx_raw {vx_cmd_raw:+.3f}",
+                        f" vx_smooth {vx_cmd_smooth:+.3f}",
                         f" vx_cmd {vx:+.3f} m/s",
                         f" omega_cmd {omega:+.3f} rad/s",
+                        f" v_forward {forward_speed_meas:+.3f} m/s",
+                        f" pitch_rate {np.degrees(pitch_rate_meas):+.1f} deg/s",
+                        f" accel_cmd {forward_accel_cmd:+.2f} cmd/s",
+                        f" rot_drift {rotate_drift_err_m:+.3f} m",
+                        f" rot_corr {rotate_drift_correction:+.3f}",
+                        f" traction_risk {front_unload_risk:.2f}",
+                        f" traction_scale {traction_scale:.2f}",
+                        f" traction_block {'YES' if front_traction_blocked else 'no'}",
+                        f" anti_tip_bias {np.degrees(anti_tip_pitch_bias):+.2f} deg",
                         f" wheel_left {left_vel:+.3f}",
                         f" wheel_right {right_vel:+.3f}",
                     ]
