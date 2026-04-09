@@ -2,7 +2,12 @@
 
 ![gdog_v1](gdog_v1.gif)
 
-Wheeled quadruped simulator built with [Genesis](https://github.com/Genesis-Embodied-AI/Genesis).
+Wheeled quadruped simulator built with Genesis](https://genesis-embodied-ai.github.io/)
+
+[Genesis Repo](https://github.com/Genesis-Embodied-AI/Genesis) 
+
+
+
 
 - randomized robot morphology and terrain 
 - photo-realistic rendering with dynamic shadows
