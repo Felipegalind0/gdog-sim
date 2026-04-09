@@ -65,10 +65,11 @@ class CommandState:
             self.cam_zoom += cam_zoom
             if txt_cmd:
                 self.text_cmds.append(str(txt_cmd))
-            self.voice_cmd = voice_cmd
-            self.voice_direction = voice_direction
-            self.voice_amount = voice_amount
-            self.voice_call_id = None if voice_call_id is None else str(voice_call_id)
+            if voice_cmd is not None:
+                self.voice_cmd = voice_cmd
+                self.voice_direction = voice_direction
+                self.voice_amount = voice_amount
+                self.voice_call_id = None if voice_call_id is None else str(voice_call_id)
 
     def get(self):
         with self._lock:
