@@ -73,6 +73,13 @@ KEYBOARD_VX_CMD = 24.0
 KEYBOARD_YAW_CMD = -8.0
 MAX_REMOTE_PITCH_SETPOINT_RAD = float(np.deg2rad(12.0))
 MAX_REMOTE_ROLL_SETPOINT_RAD = float(np.deg2rad(12.0))
+VOICE_PWM_PERIOD_STEPS = 10
+VOICE_MOVE_STOP_TOL_M = 0.02
+VOICE_MOVE_PULSE_NEAR_M = 0.10
+VOICE_MOVE_PULSE_MID_M = 0.30
+VOICE_ROT_STOP_TOL_RAD = float(np.deg2rad(2.0))
+VOICE_ROT_PULSE_NEAR_RAD = float(np.deg2rad(8.0))
+VOICE_ROT_PULSE_MID_RAD = float(np.deg2rad(24.0))
 DEFAULT_BACKEND_HOST = "0.0.0.0"
 DEFAULT_BACKEND_PORT = 8000
 DEFAULT_QUICK_TUNNEL_STARTUP_TIMEOUT_SEC = 20.0
@@ -607,21 +614,137 @@ def main():
     else:
         print(f"Simulation loop steps: {steps}")
 
+    active_voice_task = None
+    voice_pwm_tick = 0
+
     try:
         i = 0
         while steps <= 0 or i < steps:
-            vx, omega, pitch_cmd, roll_cmd, cam_dx, cam_dy, cam_zoom, text_cmds = state.get()
+            vx, omega, pitch_cmd, roll_cmd, cam_dx, cam_dy, cam_zoom, text_cmds, voice_cmd, voice_direction, voice_amount = state.get()
 
             pitch_pid.setpoint = float(np.clip(pitch_cmd, -1.0, 1.0)) * MAX_REMOTE_PITCH_SETPOINT_RAD
             roll_pid.setpoint = float(np.clip(roll_cmd, -1.0, 1.0)) * MAX_REMOTE_ROLL_SETPOINT_RAD
 
             kb_up, kb_down, kb_left, kb_right = camera_controller.get_keyboard_drive_flags()
 
+            manual_input = (
+                abs(vx) > 1e-4
+                or abs(omega) > 1e-4
+                or kb_up
+                or kb_down
+                or kb_left
+                or kb_right
+            )
+
+            pos_raw = robot.get_pos()
+            if hasattr(pos_raw, "cpu"):
+                pos_raw = pos_raw.cpu()
+            curr_pos = np.asarray(pos_raw, dtype=float).reshape(-1)
+
+            curr_forward_xy = np.asarray(_forward_xy_from_quat_wxyz(robot.get_quat()), dtype=float)
+            curr_heading = float(np.arctan2(curr_forward_xy[1], curr_forward_xy[0]))
+
+            received_voice_cmd = str(voice_cmd).strip().lower() if voice_cmd else ""
+            if received_voice_cmd == "stop":
+                active_voice_task = None
+            elif received_voice_cmd in ("move", "rotate"):
+                requested_dir = str(voice_direction or "").strip().lower()
+                requested_amt = max(float(voice_amount), 0.0)
+
+                if received_voice_cmd == "rotate" and requested_amt > (2.0 * np.pi + 0.25):
+                    # Accept accidental degree payloads by auto-converting to radians.
+                    requested_amt = float(np.deg2rad(requested_amt))
+
+                if received_voice_cmd == "move" and requested_amt > 0.0:
+                    move_sign = 0.0
+                    if requested_dir in ("", "forward", "fwd"):
+                        move_sign = 1.0
+                    elif requested_dir in ("backward", "back", "bwd", "reverse", "rev"):
+                        move_sign = -1.0
+
+                    if move_sign != 0.0:
+                        active_voice_task = {
+                            "type": "move",
+                            "dir_sign": move_sign,
+                            "target": requested_amt,
+                            "start_pos_xy": curr_pos[:2].copy(),
+                            "start_forward_xy": curr_forward_xy.copy(),
+                        }
+                        voice_pwm_tick = 0
+
+                elif received_voice_cmd == "rotate" and requested_amt > 0.0:
+                    yaw_sign = 0.0
+                    if requested_dir in ("left", "l", "ccw", "counterclockwise"):
+                        yaw_sign = 1.0
+                    elif requested_dir in ("", "right", "r", "cw", "clockwise"):
+                        yaw_sign = -1.0
+
+                    if yaw_sign != 0.0:
+                        active_voice_task = {
+                            "type": "rotate",
+                            "dir_sign": yaw_sign,
+                            "target": requested_amt,
+                            "progress": 0.0,
+                            "prev_heading": curr_heading,
+                        }
+                        voice_pwm_tick = 0
+
+            if manual_input and not received_voice_cmd:
+                active_voice_task = None
+
             if kb_up or kb_down or kb_left or kb_right:
                 fwd_sign = (1.0 if kb_up else 0.0) - (1.0 if kb_down else 0.0)
                 yaw_sign = (1.0 if kb_right else 0.0) - (1.0 if kb_left else 0.0)
                 vx = fwd_sign * KEYBOARD_VX_CMD
                 omega = yaw_sign * KEYBOARD_YAW_CMD
+
+            if active_voice_task is not None:
+                voice_pwm_tick += 1
+                pwm_phase = voice_pwm_tick % VOICE_PWM_PERIOD_STEPS
+
+                if active_voice_task["type"] == "move":
+                    displacement_xy = curr_pos[:2] - active_voice_task["start_pos_xy"]
+                    progress = float(np.dot(displacement_xy, active_voice_task["start_forward_xy"]))
+                    progress *= float(active_voice_task["dir_sign"])
+                    remaining = float(active_voice_task["target"]) - progress
+
+                    if remaining <= VOICE_MOVE_STOP_TOL_M:
+                        active_voice_task = None
+                        vx = 0.0
+                        omega = 0.0
+                    else:
+                        if remaining > VOICE_MOVE_PULSE_MID_M:
+                            duty = 1.0
+                        elif remaining > VOICE_MOVE_PULSE_NEAR_M:
+                            duty = 0.6
+                        else:
+                            duty = 0.3
+                        on_steps = max(1, int(round(VOICE_PWM_PERIOD_STEPS * duty)))
+                        is_on = pwm_phase < on_steps
+                        vx = float(active_voice_task["dir_sign"]) * KEYBOARD_VX_CMD if is_on else 0.0
+                        omega = 0.0
+
+                elif active_voice_task["type"] == "rotate":
+                    step_delta = (curr_heading - active_voice_task["prev_heading"] + np.pi) % (2.0 * np.pi) - np.pi
+                    active_voice_task["prev_heading"] = curr_heading
+                    active_voice_task["progress"] += float(step_delta) * float(active_voice_task["dir_sign"])
+                    remaining = float(active_voice_task["target"]) - float(active_voice_task["progress"])
+
+                    if remaining <= VOICE_ROT_STOP_TOL_RAD:
+                        active_voice_task = None
+                        vx = 0.0
+                        omega = 0.0
+                    else:
+                        if remaining > VOICE_ROT_PULSE_MID_RAD:
+                            duty = 1.0
+                        elif remaining > VOICE_ROT_PULSE_NEAR_RAD:
+                            duty = 0.6
+                        else:
+                            duty = 0.3
+                        on_steps = max(1, int(round(VOICE_PWM_PERIOD_STEPS * duty)))
+                        is_on = pwm_phase < on_steps
+                        vx = 0.0
+                        omega = -float(active_voice_task["dir_sign"]) * KEYBOARD_YAW_CMD if is_on else 0.0
 
             do_respawn = False
             with suspension_tune_lock:
@@ -653,6 +776,7 @@ def main():
                 pitch_pid.reset()
                 roll_pid.reset()
                 respawn_settle_steps = RESPAWN_SETTLE_STEPS
+                active_voice_task = None
                 state.update(0.0, 0.0)
                 vx = 0.0
                 omega = 0.0

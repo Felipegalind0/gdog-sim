@@ -33,6 +33,9 @@ class CommandState:
         self.cam_dy = 0.0
         self.cam_zoom = 0.0
         self.text_cmds = []
+        self.voice_cmd = None
+        self.voice_direction = None
+        self.voice_amount = 0.0
 
     def update(
         self,
@@ -44,6 +47,9 @@ class CommandState:
         cam_dy=0.0,
         cam_zoom=0.0,
         txt_cmd=None,
+        voice_cmd=None,
+        voice_direction=None,
+        voice_amount=0.0,
     ):
         with self._lock:
             self.vx = vx
@@ -56,6 +62,9 @@ class CommandState:
             self.cam_zoom += cam_zoom
             if txt_cmd:
                 self.text_cmds.append(str(txt_cmd))
+            self.voice_cmd = voice_cmd
+            self.voice_direction = voice_direction
+            self.voice_amount = voice_amount
 
     def get(self):
         with self._lock:
@@ -68,11 +77,17 @@ class CommandState:
                 self.cam_dy,
                 self.cam_zoom,
                 list(self.text_cmds),
+                self.voice_cmd,
+                self.voice_direction,
+                self.voice_amount,
             )
             self.cam_dx = 0.0
             self.cam_dy = 0.0
             self.cam_zoom = 0.0
             self.text_cmds.clear()
+            self.voice_cmd = None
+            self.voice_direction = None
+            self.voice_amount = 0.0
             return out
 
     def push_command(self, txt_cmd):

@@ -92,11 +92,6 @@ If you do not have `sudo` privileges on the machine, you can run everything insi
 
 ```bash
 docker build -t gdog-sim .
-
-# Allow local Docker to connect to your X11 display
-xhost +local:docker
-
-# Run the container with GPU access and X11 GUI passthrough
 docker run --rm --ipc=host -p 8000:8000 --gpus all \
   -e NVIDIA_DRIVER_CAPABILITIES=all \
   -e DISPLAY=$DISPLAY \
@@ -114,13 +109,6 @@ docker run --rm --ipc=host -p 8000:8000 --gpus all \
 >   gdog-sim python main.py --render --host 0.0.0.0
 > ```
 *(If your cluster uses Apptainer/Singularity or Podman instead of Docker, the same Dockerfile will compile correctly).*
-
-**Option 2: Use the provided automated build script**
-If you have local `sudo` access, you can use our one-click script for Debian/Ubuntu distributions:
-
-```bash
-./scripts/install_ubuntu_arm64.sh
-```
 
 Optional WebRTC support:
 

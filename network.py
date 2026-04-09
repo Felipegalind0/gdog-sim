@@ -45,7 +45,11 @@ def create_app(state):
             def on_message(message):
                 try:
                     data = json.loads(message)
-                    state.update(*_parse_command_payload(data))
+                    args = _parse_command_payload(data)
+                    voice_cmd = data.get("voice_cmd")
+                    voice_direction = data.get("direction")
+                    voice_amount = float(data.get("amount", 0.0))
+                    state.update(*args, voice_cmd=voice_cmd, voice_direction=voice_direction, voice_amount=voice_amount)
                 except Exception:
                     pass
 
@@ -64,7 +68,11 @@ def create_app(state):
                 data = await websocket.receive_text()
                 try:
                     parsed = json.loads(data)
-                    state.update(*_parse_command_payload(parsed))
+                    args = _parse_command_payload(parsed)
+                    voice_cmd = parsed.get("voice_cmd")
+                    voice_direction = parsed.get("direction")
+                    voice_amount = float(parsed.get("amount", 0.0))
+                    state.update(*args, voice_cmd=voice_cmd, voice_direction=voice_direction, voice_amount=voice_amount)
                 except Exception:
                     pass
         except WebSocketDisconnect:
