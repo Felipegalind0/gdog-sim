@@ -1,6 +1,7 @@
 import asyncio
 import json
 import importlib
+from collections import deque
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -27,6 +28,8 @@ def create_app(state):
     active_datachannels = set()
     peer_connections = set()
     broadcast_task = None
+    recent_outgoing_events = deque(maxlen=1200)
+    next_event_id = 0
 
     app.add_middleware(
         CORSMiddleware,
@@ -54,12 +57,22 @@ def create_app(state):
         )
 
     async def _broadcast_outgoing_loop():
+        nonlocal next_event_id
         while True:
             messages = state.pop_outgoing_all()
             if messages:
                 for message in messages:
                     try:
-                        encoded = json.dumps(message)
+                        payload_obj = dict(message)
+                    except Exception:
+                        payload_obj = {"type": "unknown", "payload": str(message)}
+
+                    next_event_id += 1
+                    payload_obj["_event_id"] = int(next_event_id)
+                    recent_outgoing_events.append(payload_obj)
+
+                    try:
+                        encoded = json.dumps(payload_obj)
                     except Exception:
                         continue
 
@@ -85,6 +98,33 @@ def create_app(state):
                         active_datachannels.discard(channel)
 
             await asyncio.sleep(0.05)
+
+    @app.get("/events")
+    async def events(since: int = 0, limit: int = 200):
+        try:
+            since_id = max(int(since), 0)
+        except Exception:
+            since_id = 0
+
+        try:
+            max_events = int(limit)
+        except Exception:
+            max_events = 200
+        max_events = min(max(max_events, 1), 500)
+
+        events_out = [
+            evt
+            for evt in recent_outgoing_events
+            if int(evt.get("_event_id", 0)) > since_id
+        ]
+        if len(events_out) > max_events:
+            events_out = events_out[-max_events:]
+
+        return {
+            "ok": True,
+            "latest_event_id": int(next_event_id),
+            "events": events_out,
+        }
 
     @app.on_event("startup")
     async def _startup():
