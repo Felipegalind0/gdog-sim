@@ -957,104 +957,127 @@ def main():
 
             received_voice_cmd = str(voice_cmd).strip().lower() if voice_cmd else ""
             if received_voice_cmd == "stop":
-                active_voice_task = _finish_active_voice_task(
-                    active_voice_task,
-                    status="failed",
-                    reason="Command was stopped before completion.",
-                )
-            elif received_voice_cmd in ("move", "rotate"):
-                active_voice_task = _finish_active_voice_task(
-                    active_voice_task,
-                    status="failed",
-                    reason="Superseded by a newer voice command.",
-                )
-                requested_dir = str(voice_direction or "").strip().lower()
-                requested_amt = max(float(voice_amount), 0.0)
-
-                if received_voice_cmd == "rotate" and requested_amt > (2.0 * np.pi + 0.25):
-                    # Accept accidental degree payloads by auto-converting to radians.
-                    requested_amt = float(np.deg2rad(requested_amt))
-
-                if received_voice_cmd == "move" and requested_amt > 0.0:
-                    move_sign = 0.0
-                    if requested_dir in ("", "forward", "fwd"):
-                        move_sign = 1.0
-                    elif requested_dir in ("backward", "back", "bwd", "reverse", "rev"):
-                        move_sign = -1.0
-
-                    if move_sign != 0.0:
-                        timeout_s = max(
-                            VOICE_MOVE_TIMEOUT_MIN_S,
-                            float(requested_amt) * VOICE_MOVE_TIMEOUT_PER_M_S,
-                        )
-                        active_voice_task = {
-                            "type": "move",
-                            "dir_sign": move_sign,
-                            "direction": "forward" if move_sign > 0.0 else "backward",
-                            "target": requested_amt,
-                            "start_pos_xy": curr_pos[:2].copy(),
-                            "start_forward_xy": curr_forward_xy.copy(),
-                            "call_id": voice_call_id,
-                            "started_at": float(time.monotonic()),
-                            "timeout_s": timeout_s,
-                            "last_progress_emit_at": -1e9,
-                            "last_stuck_check_progress": 0.0,
-                            "last_stuck_check_time": float(time.monotonic()),
-                            "stuck_time_accum": 0.0,
-                            "current_speed": 0.0,
-                        }
-                        voice_pwm_tick = 0
-                    else:
-                        _emit_voice_command_result(
-                            call_id=voice_call_id,
-                            command="move",
-                            status="failed",
-                            reason="Invalid move direction. Use 'forward' or 'backward'.",
-                        )
-
-                elif received_voice_cmd == "rotate" and requested_amt > 0.0:
-                    yaw_sign = 0.0
-                    if requested_dir in ("left", "l", "ccw", "counterclockwise"):
-                        yaw_sign = 1.0
-                    elif requested_dir in ("", "right", "r", "cw", "clockwise"):
-                        yaw_sign = -1.0
-
-                    if yaw_sign != 0.0:
-                        timeout_s = max(
-                            VOICE_ROT_TIMEOUT_MIN_S,
-                            float(requested_amt) * VOICE_ROT_TIMEOUT_PER_RAD_S,
-                        )
-                        active_voice_task = {
-                            "type": "rotate",
-                            "dir_sign": yaw_sign,
-                            "direction": "left" if yaw_sign > 0.0 else "right",
-                            "target": requested_amt,
-                            "progress": 0.0,
-                            "prev_heading": curr_heading,
-                            "call_id": voice_call_id,
-                            "started_at": float(time.monotonic()),
-                            "timeout_s": timeout_s,
-                            "last_progress_emit_at": -1e9,
-                            "last_stuck_check_progress": 0.0,
-                            "last_stuck_check_time": float(time.monotonic()),
-                            "stuck_time_accum": 0.0,
-                            "current_speed": 0.0,
-                        }
-                        voice_pwm_tick = 0
-                    else:
-                        _emit_voice_command_result(
-                            call_id=voice_call_id,
-                            command="rotate",
-                            status="failed",
-                            reason="Invalid rotate direction. Use 'left' or 'right'.",
-                        )
+                if active_voice_task is not None:
+                    active_voice_task = _finish_active_voice_task(
+                        active_voice_task,
+                        status="failed",
+                        reason="Command was stopped before completion.",
+                    )
                 else:
+                    # Always acknowledge explicit stop requests so clients can
+                    # clear pending UI state even if the action just finished.
                     _emit_voice_command_result(
                         call_id=voice_call_id,
-                        command=received_voice_cmd,
-                        status="failed",
-                        reason="Invalid command amount. Value must be positive.",
+                        command="stop",
+                        status="completed",
+                        reason="No active command was running.",
                     )
+            elif received_voice_cmd in ("move", "rotate"):
+                if active_voice_task is not None:
+                    active_call_id = str(active_voice_task.get("call_id") or "").strip()
+                    incoming_call_id = str(voice_call_id or "").strip()
+
+                    # Ignore duplicate start requests for the same in-flight command.
+                    if not (incoming_call_id and active_call_id and incoming_call_id == active_call_id):
+                        active_command = str(active_voice_task.get("type", "command"))
+                        _emit_voice_command_result(
+                            call_id=voice_call_id,
+                            command=received_voice_cmd,
+                            status="failed",
+                            reason=(
+                                f"Cannot start '{received_voice_cmd}' while '{active_command}' is still running. "
+                                "Wait for completion or send stop first."
+                            ),
+                            active_command=active_command,
+                        )
+                else:
+                    requested_dir = str(voice_direction or "").strip().lower()
+                    requested_amt = max(float(voice_amount), 0.0)
+
+                    if received_voice_cmd == "rotate" and requested_amt > (2.0 * np.pi + 0.25):
+                        # Accept accidental degree payloads by auto-converting to radians.
+                        requested_amt = float(np.deg2rad(requested_amt))
+
+                    if received_voice_cmd == "move" and requested_amt > 0.0:
+                        move_sign = 0.0
+                        if requested_dir in ("", "forward", "fwd"):
+                            move_sign = 1.0
+                        elif requested_dir in ("backward", "back", "bwd", "reverse", "rev"):
+                            move_sign = -1.0
+
+                        if move_sign != 0.0:
+                            timeout_s = max(
+                                VOICE_MOVE_TIMEOUT_MIN_S,
+                                float(requested_amt) * VOICE_MOVE_TIMEOUT_PER_M_S,
+                            )
+                            active_voice_task = {
+                                "type": "move",
+                                "dir_sign": move_sign,
+                                "direction": "forward" if move_sign > 0.0 else "backward",
+                                "target": requested_amt,
+                                "start_pos_xy": curr_pos[:2].copy(),
+                                "start_forward_xy": curr_forward_xy.copy(),
+                                "call_id": voice_call_id,
+                                "started_at": float(time.monotonic()),
+                                "timeout_s": timeout_s,
+                                "last_progress_emit_at": -1e9,
+                                "last_stuck_check_progress": 0.0,
+                                "last_stuck_check_time": float(time.monotonic()),
+                                "stuck_time_accum": 0.0,
+                                "current_speed": 0.0,
+                            }
+                            voice_pwm_tick = 0
+                        else:
+                            _emit_voice_command_result(
+                                call_id=voice_call_id,
+                                command="move",
+                                status="failed",
+                                reason="Invalid move direction. Use 'forward' or 'backward'.",
+                            )
+
+                    elif received_voice_cmd == "rotate" and requested_amt > 0.0:
+                        yaw_sign = 0.0
+                        if requested_dir in ("left", "l", "ccw", "counterclockwise"):
+                            yaw_sign = 1.0
+                        elif requested_dir in ("", "right", "r", "cw", "clockwise"):
+                            yaw_sign = -1.0
+
+                        if yaw_sign != 0.0:
+                            timeout_s = max(
+                                VOICE_ROT_TIMEOUT_MIN_S,
+                                float(requested_amt) * VOICE_ROT_TIMEOUT_PER_RAD_S,
+                            )
+                            active_voice_task = {
+                                "type": "rotate",
+                                "dir_sign": yaw_sign,
+                                "direction": "left" if yaw_sign > 0.0 else "right",
+                                "target": requested_amt,
+                                "progress": 0.0,
+                                "prev_heading": curr_heading,
+                                "call_id": voice_call_id,
+                                "started_at": float(time.monotonic()),
+                                "timeout_s": timeout_s,
+                                "last_progress_emit_at": -1e9,
+                                "last_stuck_check_progress": 0.0,
+                                "last_stuck_check_time": float(time.monotonic()),
+                                "stuck_time_accum": 0.0,
+                                "current_speed": 0.0,
+                            }
+                            voice_pwm_tick = 0
+                        else:
+                            _emit_voice_command_result(
+                                call_id=voice_call_id,
+                                command="rotate",
+                                status="failed",
+                                reason="Invalid rotate direction. Use 'left' or 'right'.",
+                            )
+                    else:
+                        _emit_voice_command_result(
+                            call_id=voice_call_id,
+                            command=received_voice_cmd,
+                            status="failed",
+                            reason="Invalid command amount. Value must be positive.",
+                        )
 
             if manual_input and not received_voice_cmd:
                 active_voice_task = _finish_active_voice_task(
