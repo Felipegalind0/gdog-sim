@@ -11,11 +11,20 @@ def generate_random_robot_urdf(rng):
         template = Template(f.read())
 
     # Generate Random Parameters (Domain Randomization)
+    body_length = float(rng.uniform(0.4, 0.5))
+    body_width = float(rng.uniform(0.15, 0.2))
+    body_height = float(rng.uniform(0.08, 0.15))
+    face_width = float( body_width + rng.uniform(0.01, 0.02) )
+    face_height = float( body_height + rng.uniform(0.01, 0.02) )
+
     robot_params = {
-        "body_length": rng.uniform(0.4, 0.5),
-        "body_width": rng.uniform(0.15, 0.2),
-        "body_height": rng.uniform(0.08, 0.15),
+        "body_length": body_length,
+        "body_width": body_width,
+        "body_height": body_height,
         "body_mass": rng.uniform(3.0, 4.0),
+        "face_width": face_width,
+        "face_height": face_height,
+        "face_depth": float(face_width * rng.uniform(0.3, 0.4)),
         "leg_thickness": rng.uniform(0.04, 0.06),
         "thigh_length": rng.uniform(0.18, 0.25),
         "calf_thickness": rng.uniform(0.03, 0.05),
