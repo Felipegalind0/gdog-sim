@@ -29,7 +29,8 @@ python -m pip install -r requirements.txt
 
 Run the sim with interactive viewer:
 ```bash
-/Users/felg/github/gdog-sim/.venv/bin/python main.py --render --seed 829297643 --quick-tunnel
+.venv/bin/python main.py --render --seed 829297643 --quick-tunnel
+.venv/bin/python main.py --render --seed 829297643 --quick-tunnel --quick-tunnel-protocol http2 --quick-tunnel-edge-ip-version 4
 ```
 
 ## What This Project Contains
