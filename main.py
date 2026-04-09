@@ -118,6 +118,8 @@ DEFAULT_BACKEND_HOST = "0.0.0.0"
 DEFAULT_BACKEND_PORT = 8000
 DEFAULT_QUICK_TUNNEL_STARTUP_TIMEOUT_SEC = 20.0
 DEFAULT_REMOTE_CONTROLLER_URL = "https://felipegalind0.github.io/gdog-remote"
+DEFAULT_REMOTE_API_KEY_FILE = ".priv/api.md"
+DEFAULT_REMOTE_API_KEY_QUERY_PARAM = "openai_key"
 
 
 state = CommandState()
@@ -205,9 +207,50 @@ def _normalize_remote_url(remote_url):
     return value
 
 
-def _build_remote_prefilled_link(remote_url, backend_target):
+def _extract_openai_api_key(raw_text):
+    text = str(raw_text or "")
+    match = re.search(r"(sk-[A-Za-z0-9_-]+)", text)
+    if match:
+        return match.group(1).strip()
+    return ""
+
+
+def _load_remote_api_key(explicit_key, key_file):
+    from_arg = _extract_openai_api_key(explicit_key)
+    if from_arg:
+        return from_arg, "--remote-api-key"
+
+    file_path = str(key_file or "").strip()
+    if not file_path:
+        return "", ""
+
+    expanded_path = os.path.expanduser(file_path)
+    try:
+        with open(expanded_path, "r", encoding="utf-8") as handle:
+            file_contents = handle.read()
+    except FileNotFoundError:
+        return "", ""
+    except Exception as exc:
+        print(f"Failed to read remote API key file '{expanded_path}': {exc}")
+        return "", ""
+
+    from_file = _extract_openai_api_key(file_contents)
+    if from_file:
+        return from_file, expanded_path
+
+    return "", ""
+
+
+def _build_remote_prefilled_link(
+    remote_url,
+    backend_target,
+    remote_api_key="",
+    remote_api_key_param=DEFAULT_REMOTE_API_KEY_QUERY_PARAM,
+):
     base_url = _normalize_remote_url(remote_url)
     backend_value = str(backend_target or "").strip()
+    api_key_value = str(remote_api_key or "").strip()
+    api_key_param = str(remote_api_key_param or "").strip() or DEFAULT_REMOTE_API_KEY_QUERY_PARAM
     if not base_url or not backend_value:
         return ""
 
@@ -217,6 +260,8 @@ def _build_remote_prefilled_link(remote_url, backend_target):
 
     query_map = dict(parse_qsl(parts.query, keep_blank_values=True))
     query_map["backend"] = backend_value
+    if api_key_value:
+        query_map[api_key_param] = api_key_value
     new_query = urlencode(query_map, doseq=True)
 
     path = parts.path or "/"
@@ -250,12 +295,26 @@ def _print_ascii_qr(payload):
         return False
 
 
-def _print_remote_controller_shortcut(remote_url, backend_target, print_qr=True):
-    link = _build_remote_prefilled_link(remote_url, backend_target)
+def _print_remote_controller_shortcut(
+    remote_url,
+    backend_target,
+    print_qr=True,
+    remote_api_key="",
+    remote_api_key_param=DEFAULT_REMOTE_API_KEY_QUERY_PARAM,
+):
+    link = _build_remote_prefilled_link(
+        remote_url=remote_url,
+        backend_target=backend_target,
+        remote_api_key=remote_api_key,
+        remote_api_key_param=remote_api_key_param,
+    )
     if not link:
         return ""
 
-    print("Remote controller link (backend prefilled):")
+    if str(remote_api_key or "").strip():
+        print(f"Remote controller link (backend + {remote_api_key_param} prefilled):")
+    else:
+        print("Remote controller link (backend prefilled):")
     print(f"  {link}")
     if bool(print_qr):
         _print_ascii_qr(link)
@@ -379,6 +438,30 @@ def main():
         help=(
             "Base URL of gdog-remote page used when printing a prefilled link/QR "
             f"(default: {DEFAULT_REMOTE_CONTROLLER_URL})."
+        ),
+    )
+    parser.add_argument(
+        "--remote-api-key",
+        type=str,
+        default="",
+        help="OpenAI API key value to include in generated remote links as a query parameter.",
+    )
+    parser.add_argument(
+        "--remote-api-key-file",
+        type=str,
+        default=DEFAULT_REMOTE_API_KEY_FILE,
+        help=(
+            "Path to a file containing an OpenAI API key for generated remote links "
+            f"(default: {DEFAULT_REMOTE_API_KEY_FILE})."
+        ),
+    )
+    parser.add_argument(
+        "--remote-api-key-param",
+        type=str,
+        default=DEFAULT_REMOTE_API_KEY_QUERY_PARAM,
+        help=(
+            "Query parameter name used to prefill the remote API key "
+            f"(default: {DEFAULT_REMOTE_API_KEY_QUERY_PARAM})."
         ),
     )
     parser.add_argument(
@@ -618,6 +701,15 @@ def main():
     tunnel_process = None
     tunnel_url = ""
     remote_url = _normalize_remote_url(args.remote_url)
+    remote_api_key, remote_api_key_source = _load_remote_api_key(args.remote_api_key, args.remote_api_key_file)
+    remote_api_key_param = str(args.remote_api_key_param or "").strip() or DEFAULT_REMOTE_API_KEY_QUERY_PARAM
+
+    if remote_api_key:
+        print(
+            "Remote controller links will include OpenAI API key query parameter "
+            f"'{remote_api_key_param}' from {remote_api_key_source}."
+        )
+
     if args.quick_tunnel:
         tunnel_process, tunnel_url = _start_cloudflare_quick_tunnel(
             bind_host=args.host,
@@ -629,6 +721,8 @@ def main():
                 remote_url=remote_url,
                 backend_target=tunnel_url,
                 print_qr=not bool(args.no_qr),
+                remote_api_key=remote_api_key,
+                remote_api_key_param=remote_api_key_param,
             )
     elif remote_url:
         print(f"Remote controller base URL: {remote_url}")
