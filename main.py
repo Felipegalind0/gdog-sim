@@ -114,9 +114,18 @@ VOICE_MOVE_TIMEOUT_MIN_S = 4.0
 VOICE_MOVE_TIMEOUT_PER_M_S = 8.0
 VOICE_ROT_TIMEOUT_MIN_S = 4.0
 VOICE_ROT_TIMEOUT_PER_RAD_S = 5.0
+VOICE_PROGRESS_EMIT_INTERVAL_S = 0.1
+VOICE_STUCK_CHECK_INTERVAL_S = 0.1
+VOICE_STUCK_GRACE_S = 0.7
+VOICE_STUCK_WINDOW_S = 1.5
+VOICE_MOVE_STUCK_SPEED_MPS = 0.05
+VOICE_ROT_STUCK_SPEED_RAD_S = float(np.deg2rad(3.0))
 DEFAULT_BACKEND_HOST = "0.0.0.0"
 DEFAULT_BACKEND_PORT = 8000
 DEFAULT_QUICK_TUNNEL_STARTUP_TIMEOUT_SEC = 20.0
+DEFAULT_QUICK_TUNNEL_ATTEMPTS = 3
+DEFAULT_QUICK_TUNNEL_PROTOCOL = "auto"
+DEFAULT_QUICK_TUNNEL_EDGE_IP_VERSION = "auto"
 DEFAULT_REMOTE_CONTROLLER_URL = "https://felipegalind0.github.io/gdog-remote"
 DEFAULT_REMOTE_API_KEY_FILE = ".priv/api.md"
 DEFAULT_REMOTE_API_KEY_QUERY_PARAM = "openai_key"
@@ -321,7 +330,14 @@ def _print_remote_controller_shortcut(
     return link
 
 
-def _start_cloudflare_quick_tunnel(bind_host, bind_port, startup_timeout_sec=DEFAULT_QUICK_TUNNEL_STARTUP_TIMEOUT_SEC):
+def _start_cloudflare_quick_tunnel(
+    bind_host,
+    bind_port,
+    startup_timeout_sec=DEFAULT_QUICK_TUNNEL_STARTUP_TIMEOUT_SEC,
+    attempts=DEFAULT_QUICK_TUNNEL_ATTEMPTS,
+    protocol=DEFAULT_QUICK_TUNNEL_PROTOCOL,
+    edge_ip_version=DEFAULT_QUICK_TUNNEL_EDGE_IP_VERSION,
+):
     cloudflared_bin = shutil.which("cloudflared")
     if cloudflared_bin is None:
         print("Cloudflare quick tunnel requested, but 'cloudflared' is not installed.")
@@ -340,64 +356,121 @@ def _start_cloudflare_quick_tunnel(bind_host, bind_port, startup_timeout_sec=DEF
         "--no-autoupdate",
     ]
 
-    print(f"Starting Cloudflare quick tunnel for {tunnel_target_url} ...")
-    try:
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-        )
-    except Exception as exc:
-        print(f"Failed to start cloudflared: {exc}")
-        return None, None
+    protocol_value = str(protocol or "").strip().lower() or DEFAULT_QUICK_TUNNEL_PROTOCOL
+    if protocol_value != DEFAULT_QUICK_TUNNEL_PROTOCOL:
+        cmd.extend(["--protocol", protocol_value])
 
-    tunnel_url = None
+    edge_ip_version_value = str(edge_ip_version or "").strip().lower() or DEFAULT_QUICK_TUNNEL_EDGE_IP_VERSION
+    if edge_ip_version_value in {"4", "6"}:
+        cmd.extend(["--edge-ip-version", edge_ip_version_value])
+
+    attempts_int = max(int(attempts), 1)
     timeout_sec = max(float(startup_timeout_sec), 1.0)
-    deadline = time.time() + timeout_sec
     tunnel_pattern = re.compile(r"https://[-a-z0-9]+\.trycloudflare\.com", re.IGNORECASE)
 
-    while time.time() < deadline:
-        if process.poll() is not None:
-            break
-        if process.stdout is None:
-            break
+    for attempt_idx in range(attempts_int):
+        attempt_num = attempt_idx + 1
+        print(
+            "Starting Cloudflare quick tunnel for "
+            f"{tunnel_target_url} (protocol={protocol_value}, edge_ip={edge_ip_version_value}, "
+            f"attempt={attempt_num}/{attempts_int}) ..."
+        )
 
-        ready, _, _ = select.select([process.stdout], [], [], 0.25)
-        if not ready:
-            continue
+        try:
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+        except Exception as exc:
+            print(f"Failed to start cloudflared: {exc}")
+            return None, None
 
-        line = process.stdout.readline()
-        if not line:
-            continue
+        tunnel_url = None
+        recent_output_lines = []
 
-        match = tunnel_pattern.search(line)
-        if match:
-            tunnel_url = match.group(0).rstrip("/")
-            break
+        def _remember_output_line(raw_line):
+            line = str(raw_line or "").rstrip("\n")
+            if not line:
+                return
+            recent_output_lines.append(line)
+            if len(recent_output_lines) > 12:
+                del recent_output_lines[:-12]
 
-    if tunnel_url is None:
+        deadline = time.time() + timeout_sec
+        while time.time() < deadline:
+            if process.poll() is not None:
+                break
+            if process.stdout is None:
+                break
+
+            ready, _, _ = select.select([process.stdout], [], [], 0.25)
+            if not ready:
+                continue
+
+            line = process.stdout.readline()
+            if not line:
+                continue
+
+            _remember_output_line(line)
+            match = tunnel_pattern.search(line)
+            if match:
+                tunnel_url = match.group(0).rstrip("/")
+                break
+
+        if tunnel_url is not None:
+            if tunnel_url.startswith("https://"):
+                ws_base = f"wss://{tunnel_url[len('https://') :]}"
+            else:
+                ws_base = tunnel_url
+
+            print("Cloudflare quick tunnel ready:")
+            print(f"  backend target: {tunnel_url}")
+            print(f"    ws: {ws_base}/ws")
+            print(f"    offer: {tunnel_url}/offer")
+            print("Use the 'backend target' URL above in the gdog-remote backend input.")
+            return process, tunnel_url
+
+        # Drain any remaining buffered output lines after process exit.
+        if process.stdout is not None:
+            while True:
+                try:
+                    line = process.stdout.readline()
+                except Exception:
+                    break
+                if not line:
+                    break
+                _remember_output_line(line)
+
         if process.poll() is None:
             print("Timed out waiting for Cloudflare quick tunnel URL.")
         else:
             print(f"cloudflared exited before tunnel became ready (code {process.returncode}).")
+
+        if recent_output_lines:
+            print("Recent cloudflared output:")
+            for log_line in recent_output_lines[-8:]:
+                print(f"  {log_line}")
+
         _terminate_process(process, "cloudflared")
+
+        if attempt_num < attempts_int:
+            retry_delay = min(2.0 * attempt_num, 8.0)
+            print(f"Retrying quick tunnel in {retry_delay:.1f}s...")
+            time.sleep(retry_delay)
+            continue
+
         print("You can also start tunnel manually in another terminal:")
-        print(f"  {cloudflared_bin} tunnel --url {tunnel_target_url} --no-autoupdate")
+        print(f"  {' '.join(cmd)}")
+        print(
+            "If this is restrictive guest Wi-Fi, retry with "
+            "--quick-tunnel-protocol http2 --quick-tunnel-edge-ip-version 4."
+        )
         return None, None
 
-    if tunnel_url.startswith("https://"):
-        ws_base = f"wss://{tunnel_url[len('https://') :]}"
-    else:
-        ws_base = tunnel_url
-
-    print("Cloudflare quick tunnel ready:")
-    print(f"  backend target: {tunnel_url}")
-    print(f"    ws: {ws_base}/ws")
-    print(f"    offer: {tunnel_url}/offer")
-    print("Use the 'backend target' URL above in the gdog-remote backend input.")
-    return process, tunnel_url
+    return None, None
 
 
 def main():
@@ -429,6 +502,35 @@ def main():
         help=(
             "Seconds to wait for Cloudflare Quick Tunnel URL discovery "
             f"(default: {DEFAULT_QUICK_TUNNEL_STARTUP_TIMEOUT_SEC})."
+        ),
+    )
+    parser.add_argument(
+        "--quick-tunnel-attempts",
+        type=int,
+        default=DEFAULT_QUICK_TUNNEL_ATTEMPTS,
+        help=(
+            "Number of Cloudflare quick tunnel startup attempts before giving up "
+            f"(default: {DEFAULT_QUICK_TUNNEL_ATTEMPTS})."
+        ),
+    )
+    parser.add_argument(
+        "--quick-tunnel-protocol",
+        type=str,
+        choices=("auto", "http2", "quic"),
+        default=DEFAULT_QUICK_TUNNEL_PROTOCOL,
+        help=(
+            "Transport protocol cloudflared uses to connect to Cloudflare edge "
+            f"(default: {DEFAULT_QUICK_TUNNEL_PROTOCOL}). Use 'http2' on restrictive networks."
+        ),
+    )
+    parser.add_argument(
+        "--quick-tunnel-edge-ip-version",
+        type=str,
+        choices=("auto", "4", "6"),
+        default=DEFAULT_QUICK_TUNNEL_EDGE_IP_VERSION,
+        help=(
+            "Force edge IP family for cloudflared "
+            f"(default: {DEFAULT_QUICK_TUNNEL_EDGE_IP_VERSION}). Try '4' if guest Wi-Fi has broken IPv6."
         ),
     )
     parser.add_argument(
@@ -715,6 +817,9 @@ def main():
             bind_host=args.host,
             bind_port=args.port,
             startup_timeout_sec=args.quick_tunnel_timeout,
+            attempts=args.quick_tunnel_attempts,
+            protocol=args.quick_tunnel_protocol,
+            edge_ip_version=args.quick_tunnel_edge_ip_version,
         )
         if tunnel_url:
             _print_remote_controller_shortcut(
@@ -776,6 +881,19 @@ def main():
         }
         if reason:
             payload["reason"] = str(reason)
+        payload.update(extra)
+        state.push_outgoing(payload)
+
+    def _emit_voice_command_progress(call_id, command, **extra):
+        call_id_text = str(call_id or "").strip()
+        if not call_id_text:
+            return
+
+        payload = {
+            "type": "voice_command_progress",
+            "call_id": call_id_text,
+            "command": str(command),
+        }
         payload.update(extra)
         state.push_outgoing(payload)
 
@@ -872,12 +990,18 @@ def main():
                         active_voice_task = {
                             "type": "move",
                             "dir_sign": move_sign,
+                            "direction": "forward" if move_sign > 0.0 else "backward",
                             "target": requested_amt,
                             "start_pos_xy": curr_pos[:2].copy(),
                             "start_forward_xy": curr_forward_xy.copy(),
                             "call_id": voice_call_id,
                             "started_at": float(time.monotonic()),
                             "timeout_s": timeout_s,
+                            "last_progress_emit_at": -1e9,
+                            "last_stuck_check_progress": 0.0,
+                            "last_stuck_check_time": float(time.monotonic()),
+                            "stuck_time_accum": 0.0,
+                            "current_speed": 0.0,
                         }
                         voice_pwm_tick = 0
                     else:
@@ -903,12 +1027,18 @@ def main():
                         active_voice_task = {
                             "type": "rotate",
                             "dir_sign": yaw_sign,
+                            "direction": "left" if yaw_sign > 0.0 else "right",
                             "target": requested_amt,
                             "progress": 0.0,
                             "prev_heading": curr_heading,
                             "call_id": voice_call_id,
                             "started_at": float(time.monotonic()),
                             "timeout_s": timeout_s,
+                            "last_progress_emit_at": -1e9,
+                            "last_stuck_check_progress": 0.0,
+                            "last_stuck_check_time": float(time.monotonic()),
+                            "stuck_time_accum": 0.0,
+                            "current_speed": 0.0,
                         }
                         voice_pwm_tick = 0
                     else:
@@ -962,7 +1092,7 @@ def main():
                     active_voice_task = _finish_active_voice_task(
                         active_voice_task,
                         status="failed",
-                        reason="Command timed out before completion.",
+                        reason="Fallback safety timeout reached before completion.",
                         elapsed_s=elapsed_s,
                         timeout_s=timeout_s,
                     )
@@ -986,6 +1116,59 @@ def main():
                         dtype=float,
                     )
                     lateral_error_m = abs(float(np.dot(displacement_xy, lateral_axis_xy)))
+
+                    progress_clamped = float(np.clip(progress, 0.0, float(active_voice_task["target"])))
+                    remaining_clamped = float(max(remaining, 0.0))
+                    target_m = float(active_voice_task["target"])
+                    now_monotonic = float(time.monotonic())
+
+                    dt_stuck = now_monotonic - active_voice_task["last_stuck_check_time"]
+                    if dt_stuck >= VOICE_STUCK_CHECK_INTERVAL_S:
+                        dp = progress_clamped - active_voice_task["last_stuck_check_progress"]
+                        speed = dp / max(dt_stuck, 1e-6)
+                        active_voice_task["current_speed"] = float(speed)
+
+                        should_count_as_stuck = (
+                            elapsed_s >= VOICE_STUCK_GRACE_S
+                            and remaining_clamped > VOICE_MOVE_STOP_TOL_M
+                            and speed < VOICE_MOVE_STUCK_SPEED_MPS
+                        )
+                        if should_count_as_stuck:
+                            active_voice_task["stuck_time_accum"] += dt_stuck
+                        else:
+                            active_voice_task["stuck_time_accum"] = 0.0
+
+                        active_voice_task["last_stuck_check_progress"] = progress_clamped
+                        active_voice_task["last_stuck_check_time"] = now_monotonic
+
+                        if active_voice_task["stuck_time_accum"] > VOICE_STUCK_WINDOW_S:
+                            active_voice_task = _finish_active_voice_task(
+                                active_voice_task,
+                                status="failed",
+                                reason=(
+                                    "Robot stopped making progress toward the move target "
+                                    f"({speed:.2f} m/s for {VOICE_STUCK_WINDOW_S:.1f}s)."
+                                ),
+                            )
+                            vx = 0.0
+                            omega = 0.0
+                            continue
+
+                    if now_monotonic - float(active_voice_task.get("last_progress_emit_at", -1e9)) >= VOICE_PROGRESS_EMIT_INTERVAL_S:
+                        _emit_voice_command_progress(
+                            call_id=active_voice_task.get("call_id"),
+                            command="move",
+                            direction=str(active_voice_task.get("direction", "forward")),
+                            progress_m=progress_clamped,
+                            target_m=target_m,
+                            remaining_m=remaining_clamped,
+                            progress_ratio=float(np.clip(progress_clamped / max(target_m, 1e-6), 0.0, 1.0)),
+                            current_speed=active_voice_task.get("current_speed", 0.0),
+                            lateral_error_m=float(lateral_error_m),
+                            elapsed_s=float(elapsed_s),
+                            timeout_s=float(active_voice_task.get("timeout_s", 0.0)),
+                        )
+                        active_voice_task["last_progress_emit_at"] = now_monotonic
 
                     if remaining <= VOICE_MOVE_STOP_TOL_M:
                         if lateral_error_m <= VOICE_MOVE_MAX_LATERAL_ERROR_M:
@@ -1026,6 +1209,61 @@ def main():
                     active_voice_task["prev_heading"] = curr_heading
                     active_voice_task["progress"] += float(step_delta) * float(active_voice_task["dir_sign"])
                     remaining = float(active_voice_task["target"]) - float(active_voice_task["progress"])
+
+                    progress_clamped_rad = float(np.clip(float(active_voice_task["progress"]), 0.0, float(active_voice_task["target"])))
+                    remaining_clamped_rad = float(max(remaining, 0.0))
+                    target_rad = float(active_voice_task["target"])
+                    now_monotonic = float(time.monotonic())
+
+                    dt_stuck = now_monotonic - active_voice_task["last_stuck_check_time"]
+                    if dt_stuck >= VOICE_STUCK_CHECK_INTERVAL_S:
+                        dp = progress_clamped_rad - active_voice_task["last_stuck_check_progress"]
+                        speed = dp / max(dt_stuck, 1e-6)
+                        active_voice_task["current_speed"] = float(speed)
+
+                        should_count_as_stuck = (
+                            elapsed_s >= VOICE_STUCK_GRACE_S
+                            and remaining_clamped_rad > VOICE_ROT_STOP_TOL_RAD
+                            and speed < VOICE_ROT_STUCK_SPEED_RAD_S
+                        )
+                        if should_count_as_stuck:
+                            active_voice_task["stuck_time_accum"] += dt_stuck
+                        else:
+                            active_voice_task["stuck_time_accum"] = 0.0
+
+                        active_voice_task["last_stuck_check_progress"] = progress_clamped_rad
+                        active_voice_task["last_stuck_check_time"] = now_monotonic
+
+                        if active_voice_task["stuck_time_accum"] > VOICE_STUCK_WINDOW_S:
+                            active_voice_task = _finish_active_voice_task(
+                                active_voice_task,
+                                status="failed",
+                                reason=(
+                                    "Robot stopped making progress toward the rotate target "
+                                    f"({np.degrees(speed):.1f} deg/s for {VOICE_STUCK_WINDOW_S:.1f}s)."
+                                ),
+                            )
+                            vx = 0.0
+                            omega = 0.0
+                            continue
+
+                    if now_monotonic - float(active_voice_task.get("last_progress_emit_at", -1e9)) >= VOICE_PROGRESS_EMIT_INTERVAL_S:
+                        _emit_voice_command_progress(
+                            call_id=active_voice_task.get("call_id"),
+                            command="rotate",
+                            direction=str(active_voice_task.get("direction", "left")),
+                            progress_rad=progress_clamped_rad,
+                            target_rad=target_rad,
+                            remaining_rad=remaining_clamped_rad,
+                            progress_deg=float(np.degrees(progress_clamped_rad)),
+                            target_deg=float(np.degrees(target_rad)),
+                            remaining_deg=float(np.degrees(remaining_clamped_rad)),
+                            progress_ratio=float(np.clip(progress_clamped_rad / max(target_rad, 1e-6), 0.0, 1.0)),
+                            current_speed=active_voice_task.get("current_speed", 0.0),
+                            elapsed_s=float(elapsed_s),
+                            timeout_s=float(active_voice_task.get("timeout_s", 0.0)),
+                        )
+                        active_voice_task["last_progress_emit_at"] = now_monotonic
 
                     if remaining <= VOICE_ROT_STOP_TOL_RAD:
                         active_voice_task = _finish_active_voice_task(

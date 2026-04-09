@@ -116,6 +116,14 @@ def create_app(state):
     async def capabilities():
         return {"webrtc": bool(HAS_WEBRTC)}
 
+    @app.post("/command")
+    async def command(payload: dict):
+        if not isinstance(payload, dict):
+            return {"ok": False, "error": "Command payload must be a JSON object."}
+
+        _handle_incoming_payload(payload)
+        return {"ok": True}
+
     @app.post("/offer")
     async def offer(params: dict):
         if not HAS_WEBRTC:

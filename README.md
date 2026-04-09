@@ -179,6 +179,12 @@ If your network is slow to provision the quick tunnel URL, increase wait time:
 python main.py --render --quick-tunnel --quick-tunnel-timeout 60
 ```
 
+For restrictive guest/corporate Wi-Fi, force TCP-based edge transport and IPv4:
+
+```bash
+python main.py --render --quick-tunnel --quick-tunnel-protocol http2 --quick-tunnel-edge-ip-version 4
+```
+
 On startup, the simulator prints:
 
 - local backend targets (`<ip>:8000`)
@@ -200,6 +206,9 @@ Useful options:
 - `--remote-url <url>`: override remote page URL (default is hardcoded to `https://felipegalind0.github.io/gdog-remote`)
 - `--no-qr`: print link only, disable terminal QR rendering
 - `--quick-tunnel-timeout <seconds>`: wait longer for tunnel URL discovery
+- `--quick-tunnel-attempts <n>`: retry quick tunnel startup before failing
+- `--quick-tunnel-protocol auto|http2|quic`: cloudflared edge transport; use `http2` on restrictive networks
+- `--quick-tunnel-edge-ip-version auto|4|6`: force IP family; use `4` when guest Wi-Fi has broken IPv6
 
 If quick tunnel URL discovery still times out in the simulator, run cloudflared manually in a second terminal:
 
@@ -285,6 +294,17 @@ Unknown keys are reported with suggestions, and invalid values return per-key hi
 - Endpoint: `ws://<host>:8000/ws`
 - Behavior: accepts text JSON frames and updates command state
 
+### HTTP Command Fallback
+
+- Endpoint: `POST http://<host>:8000/command`
+- Behavior: accepts JSON command payloads using the same fields as WebSocket frames
+- Purpose: lets control commands pass through restrictive networks that block WebSocket upgrades
+
+### Capabilities
+
+- Endpoint: `GET http://<host>:8000/capabilities`
+- Returns JSON such as `{"webrtc": false}`
+
 ### WebRTC (Optional)
 
 - Endpoint: `POST http://<host>:8000/offer`
@@ -297,8 +317,8 @@ Unknown keys are reported with suggestions, and invalid values return per-key hi
 
 ### Important Note
 
-There is currently **no** `/capabilities` endpoint in `network.py`.
-The companion `gdog-remote` app probes that route and gracefully falls back to WebSocket mode when unavailable.
+Voice command progress/result events stream over WebSocket or WebRTC data channel.
+If the remote is in HTTP fallback mode, basic joystick control still works, but voice command telemetry will be limited.
 
 ## Running With gdog-remote
 
@@ -335,8 +355,13 @@ The remote app streams controls at 50 Hz and prefers WebRTC data channel when co
 - `aiortc not installed. WebRTC disabled. Using WebSockets as primary.`
   - Expected unless optional WebRTC dependency is installed
 - Remote shows capability probe warning
-  - Expected with current backend because `/capabilities` is not implemented
-  - WebSocket control should still work
+  - backend may be unreachable, blocked by mixed-content rules, or blocked by network policy
+  - `/capabilities` should exist; test with `curl http://<host>:8000/capabilities`
+  - if WebSocket is blocked on guest Wi-Fi, remote should automatically switch to HTTP fallback mode
+- Cloudflare quick tunnel exits with `status_code="500 Internal Server Error"` and `error code: 1101`
+  - quick tunnel API is failing upstream (not a simulator bug)
+  - retry after a minute or use an alternate egress network/VPN
+  - consider a named Cloudflare tunnel (account-backed) for higher reliability
 - Robot does not react to remote controls
   - confirm sim is running
   - confirm backend reachable at `http://localhost:8000/ws`
