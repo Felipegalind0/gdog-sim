@@ -7,6 +7,7 @@ Wheeled quadruped simulator built with [Genesis](https://github.com/Genesis-Embo
 - randomized robot morphology and terrain 
 - photo-realistic rendering with dynamic shadows
 - PID-stabilized suspension control
+- predictive inverted-pendulum longitudinal control (command-aware stance IK + brake feedforward)
 - Smartphone remote control via [gdog-remote](https://github.com/Felipegalind0/gdog-remote) companion app with WebSocket and optional WebRTC 4 UDP
 
 ## Quick Start
@@ -48,7 +49,7 @@ Run the sim with interactive viewer:
 
 On startup, `main.py` does the following:
 
-1. Parses CLI arguments (`--render`, `--video`, `--seed`, `--steps`)
+1. Parses CLI arguments (`--render`, `--video`, `--seed`, `--spawn-bone`, `--steps`)
 2. Initializes Genesis with GPU backend and a deterministic runtime seed
 3. Builds a lunar-looking scene:
    - random terrain patch layout (center patch forced flat for stable spawn)
@@ -58,10 +59,57 @@ On startup, `main.py` does the following:
 5. Splits robot joints into leg joints (position-controlled) and wheel joints (velocity-controlled)
 6. Starts FastAPI control server in a background thread (`0.0.0.0:8000`)
 7. Runs the main simulation loop:
-   - consumes remote and keyboard commands
-   - applies roll/pitch stabilization through PID + two-link vertical IK
-   - computes skid-steer wheel targets (`left = vx - omega`, `right = vx + omega`)
-   - updates viewer/capture camera and overlays
+  - consumes remote and keyboard commands
+  - computes speed-adaptive drive command envelopes
+  - predicts desired longitudinal acceleration from normalized command and speed error
+  - maps desired acceleration to desired tilt using $\theta_{des} = \arctan\left(\frac{a_{des}}{g}\right)$
+  - converts desired tilt to fore-aft leg placement target and applies smoothed two-link IK
+  - scales brake authority with predictive deceleration demand before velocity ramp limiting
+  - applies roll/pitch stabilization through PID + two-link vertical IK
+  - computes skid-steer wheel targets (`left = vx - omega`, `right = vx + omega`)
+  - updates viewer/capture camera and overlays
+
+## Longitudinal Control Architecture
+
+The simulator now uses a command-predictive longitudinal controller instead of purely reactive stance shifting.
+
+Control flow per simulation step:
+
+1. Read longitudinal command and normalize it to `[-1, 1]` after drive envelope clamping.
+2. Convert normalized command to desired forward speed target.
+3. Compute speed error against measured forward speed.
+4. Convert speed error to desired acceleration target and clamp to physical limits.
+5. Convert desired acceleration to desired pendulum tilt with $\theta_{des} = \arctan\left(\frac{a_{des}}{g}\right)$.
+6. Convert desired tilt to desired leg X placement (inverted-pendulum wheel placement proxy).
+7. Filter and clamp leg X target, then apply IK for each leg.
+8. Compute predictive brake feedforward scale from deceleration alignment and apply it to brake ramp limit.
+
+Sign convention used by stance IK:
+
+- positive leg X: wheels move backward relative to body
+- negative leg X: wheels move forward relative to body
+
+This makes acceleration and deceleration one symmetric signal with opposite sign, while still allowing independent safety limits for traction and tip risk.
+
+Interpretation: the controller estimates the non-gravity longitudinal force needed to balance an inverted pendulum via desired acceleration, then realizes that demand through wheel braking/drive authority plus stance placement.
+
+### Key Tuning Parameters
+
+Primary predictive stance and braking knobs in `main.py`:
+
+- `STANCE_SHIFT_MAX_LEG_X_M`: hard fore-aft IK travel cap
+- `STANCE_SHIFT_CMD_SPEED_MAX_MPS`: maps normalized command to desired speed target
+- `STANCE_SHIFT_SPEED_ERROR_TO_ACCEL_GAIN`: converts speed error to desired acceleration
+- `STANCE_SHIFT_ACCEL_MAX_MPS2`: clamp for desired acceleration magnitude
+- `STANCE_SHIFT_TILT_TO_LEG_X_GAIN`: maps desired tilt to leg X shift
+- `STANCE_SHIFT_FILTER_ALPHA`: stance target smoothing factor
+- `DRIVE_BRAKE_PREDICTIVE_GAIN`: extra brake authority from predictive decel demand
+
+Existing drive safety/ramp controls still apply on top:
+
+- `DRIVE_ACCEL_RESPONSE_GAIN`, `DRIVE_BRAKE_RESPONSE_GAIN`
+- `DRIVE_VX_ACCEL_LIMIT[_STATIONARY]`, `DRIVE_VX_DECEL_LIMIT[_STATIONARY]`
+- `DRIVE_BRAKE_THROTTLE_MIN`, `DRIVE_BRAKE_REVERSE_SCALE`
 
 ## Requirements
 
@@ -130,6 +178,12 @@ Deterministic randomized world:
 
 ```bash
 python main.py --render --seed 12345
+```
+
+Deterministic randomized world with a random terrain bone prop:
+
+```bash
+python main.py --render --seed 12345 --spawn-bone
 ```
 
 Custom backend bind host/port:

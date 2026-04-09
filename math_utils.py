@@ -39,10 +39,14 @@ def _ik_two_link_for_vertical_position(
     desired_leg_z,
     thigh_length,
     calf_length,
+    desired_leg_x=0.0,
     hip_limits=(-1.5, 1.5),
     knee_limits=(-2.5, 0.0),
 ):
-    """Approximate sagittal-plane IK with target kept under the hip (x ~= 0)."""
+    """Sagittal-plane IK for leg target (x, z) in hip-local frame.
+
+    Positive x shifts the wheel/foot forward relative to the body.
+    """
     l1 = max(float(thigh_length), 1e-6)
     l2 = max(float(calf_length), 1e-6)
 
@@ -51,15 +55,32 @@ def _ik_two_link_for_vertical_position(
 
     reach_max = max(l1 + l2 - 1e-5, 1e-5)
     reach_min = np.sqrt(max(l1 * l1 + l2 * l2 + 2.0 * l1 * l2 * np.cos(knee_min), 1e-10))
-    z_target = float(np.clip(desired_leg_z, reach_min, reach_max))
+    x_target = float(desired_leg_x)
+    z_target = float(desired_leg_z)
 
-    cos_knee = (z_target * z_target - l1 * l1 - l2 * l2) / (2.0 * l1 * l2)
+    radius = np.hypot(x_target, z_target)
+    if radius < 1e-9:
+        x_target = 0.0
+        z_target = reach_min
+        radius = z_target
+
+    if radius > reach_max:
+        scale = reach_max / radius
+        x_target *= scale
+        z_target *= scale
+    elif radius < reach_min:
+        scale = reach_min / radius
+        x_target *= scale
+        z_target *= scale
+
+    radius_sq = x_target * x_target + z_target * z_target
+    cos_knee = (radius_sq - l1 * l1 - l2 * l2) / (2.0 * l1 * l2)
     cos_knee = float(np.clip(cos_knee, -1.0, 1.0))
     knee_angle = -np.arccos(cos_knee)
     knee_angle = float(np.clip(knee_angle, knee_min, knee_max))
 
-    # x target is set to zero, so alpha is zero in this simplified leg geometry.
-    hip_angle = -np.arctan2(l2 * np.sin(knee_angle), l1 + l2 * np.cos(knee_angle))
+    target_angle = np.arctan2(x_target, z_target)
+    hip_angle = target_angle - np.arctan2(l2 * np.sin(knee_angle), l1 + l2 * np.cos(knee_angle))
     hip_angle = float(np.clip(hip_angle, hip_min, hip_max))
 
     return hip_angle, knee_angle

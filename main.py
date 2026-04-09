@@ -6,6 +6,7 @@ import select
 import shutil
 import socket
 import subprocess
+import tempfile
 import threading
 import time
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
@@ -71,6 +72,13 @@ COMMAND_BUFFER_MAX = 96
 COMMAND_HISTORY_MAX = 100
 KEYBOARD_VX_CMD = 24.0
 KEYBOARD_YAW_CMD = -8.0
+# Global drive command gains. Increase for more raw wheel power from all inputs.
+DRIVE_INPUT_VX_GAIN = 1.45
+DRIVE_INPUT_OMEGA_GAIN = 1.10
+# Ramp response gains. Increase to accelerate/decelerate faster.
+DRIVE_ACCEL_RESPONSE_GAIN = 1.80
+DRIVE_BRAKE_RESPONSE_GAIN = 4
+DRIVE_BRAKE_PREDICTIVE_GAIN = 1.20
 ROTATE_ONLY_VX_DEADBAND = 0.15
 ROTATE_ONLY_OMEGA_MIN = 0.10
 ROTATE_DRIFT_KP = 24.0
@@ -78,8 +86,24 @@ ROTATE_DRIFT_KI = 6.0
 ROTATE_DRIFT_KD = 3.0
 ROTATE_DRIFT_I_LIMIT = 0.30
 ROTATE_DRIFT_MAX_CORRECTION = 7.0
-DRIVE_VX_ACCEL_LIMIT = 40.0
-DRIVE_VX_DECEL_LIMIT = 55.0
+# Speed-adaptive drive envelope: conservative from standstill, faster once stable.
+DRIVE_POWER_SCALE_MIN = 2
+DRIVE_POWER_SCALE_MAX = 5
+DRIVE_OMEGA_SCALE_MAX = 2.40
+DRIVE_POWER_SPEED_START_MPS = 0.10
+DRIVE_POWER_SPEED_FULL_MPS = 1.80
+DRIVE_POWER_YAW_START_RAD_S = float(np.deg2rad(12.0))
+DRIVE_POWER_YAW_FULL_RAD_S = float(np.deg2rad(170.0))
+DRIVE_VX_ACCEL_LIMIT_STATIONARY = 16.0
+DRIVE_VX_ACCEL_LIMIT = 92.0
+DRIVE_VX_DECEL_LIMIT_STATIONARY = 10
+DRIVE_VX_DECEL_LIMIT = 150
+DRIVE_BRAKE_THROTTLE_MIN = 0.5
+DRIVE_BRAKE_REVERSE_SCALE = 0.65
+DRIVE_BRAKE_PITCH_WARN_RAD = float(np.deg2rad(5.0))
+DRIVE_BRAKE_PITCH_BLOCK_RAD = float(np.deg2rad(18.0))
+DRIVE_BRAKE_PITCH_RATE_WARN_RAD_S = float(np.deg2rad(25.0))
+DRIVE_BRAKE_PITCH_RATE_BLOCK_RAD_S = float(np.deg2rad(130.0))
 DRIVE_STATE_FILTER_ALPHA = 0.25
 TRACTION_NEUTRAL_SPEED_MPS = 0.15
 TRACTION_NEUTRAL_CMD = 0.5
@@ -98,8 +122,21 @@ ANTI_TIP_PITCH_DAMP_GAIN = 0.18
 ANTI_TIP_PITCH_RESTORE_GAIN = 0.55
 ANTI_TIP_RISK_BOOST_GAIN = 0.60
 ANTI_TIP_MAX_SETPOINT_BIAS_RAD = float(np.deg2rad(8.0))
+# Dynamic longitudinal stance shift (predictive inverted-pendulum style):
+# +x moves wheels back relative to body and -x moves wheels forward.
+# Command -> desired speed -> desired accel -> desired tilt -> desired leg x.
+STANCE_SHIFT_MAX_LEG_X_M = 0.25
+STANCE_SHIFT_CMD_SPEED_MAX_MPS = 3.2
+STANCE_SHIFT_SPEED_ERROR_TO_ACCEL_GAIN = 4.0
+STANCE_SHIFT_ACCEL_MAX_MPS2 = 14.0
+STANCE_SHIFT_TILT_TO_LEG_X_GAIN = 0.20
+STANCE_SHIFT_FILTER_ALPHA = 0.55
+STANCE_SHIFT_RISK_REDUCTION_GAIN = 0.70
+STANCE_SHIFT_MIN_SCALE = 0.25
+STANCE_SHIFT_IK_MIN_X_M = 1e-4
 MAX_REMOTE_PITCH_SETPOINT_RAD = float(np.deg2rad(12.0))
 MAX_REMOTE_ROLL_SETPOINT_RAD = float(np.deg2rad(12.0))
+BONE_RESPAWN_COOLDOWN_STEPS = 20
 VOICE_PWM_PERIOD_STEPS = 10
 VOICE_MOVE_STOP_TOL_M = 0.02
 VOICE_MOVE_PULSE_NEAR_M = 0.10
@@ -188,6 +225,244 @@ def _print_backend_endpoints(host, port):
         print(f"    offer: http://{ip_addr}:{port_int}/offer")
 
     print("For gdog-remote backend input, use one of the 'backend target' values above.")
+
+
+def _sample_random_terrain_xy(
+    rng,
+    terrain_info,
+    min_center_distance=0.0,
+    avoid_xy=None,
+    min_avoid_distance=0.0,
+):
+    n_subterrains = terrain_info.get("n_subterrains") or (1, 1)
+    subterrain_size = terrain_info.get("subterrain_size") or (4.0, 4.0)
+
+    terrain_width = max(float(n_subterrains[0]) * float(subterrain_size[0]), 1e-3)
+    terrain_depth = max(float(n_subterrains[1]) * float(subterrain_size[1]), 1e-3)
+
+    margin = min(1.0, 0.1 * min(terrain_width, terrain_depth))
+    x_min = -0.5 * terrain_width + margin
+    x_max = 0.5 * terrain_width - margin
+    y_min = -0.5 * terrain_depth + margin
+    y_max = 0.5 * terrain_depth - margin
+
+    if x_min >= x_max:
+        x_min, x_max = -0.5 * terrain_width, 0.5 * terrain_width
+    if y_min >= y_max:
+        y_min, y_max = -0.5 * terrain_depth, 0.5 * terrain_depth
+
+    min_center_distance = max(float(min_center_distance), 0.0)
+    avoid_xy_vec = None
+    if avoid_xy is not None:
+        avoid_xy_vec = np.asarray(avoid_xy, dtype=float).reshape(-1)
+        if avoid_xy_vec.size < 2:
+            avoid_xy_vec = None
+    min_avoid_distance = max(float(min_avoid_distance), 0.0)
+
+    for _ in range(48):
+        x = float(rng.uniform(x_min, x_max))
+        y = float(rng.uniform(y_min, y_max))
+        if np.hypot(x, y) < min_center_distance:
+            continue
+        if avoid_xy_vec is not None and np.hypot(x - avoid_xy_vec[0], y - avoid_xy_vec[1]) < min_avoid_distance:
+            continue
+        if np.hypot(x, y) >= min_center_distance:
+            return x, y
+
+    return float(rng.uniform(x_min, x_max)), float(rng.uniform(y_min, y_max))
+
+
+def _sample_bone_spawn_pose(rng, terrain_info, avoid_xy=None):
+    bone_x, bone_y = _sample_random_terrain_xy(
+        rng,
+        terrain_info,
+        min_center_distance=2.0,
+        avoid_xy=avoid_xy,
+        min_avoid_distance=2.5,
+    )
+    bone_spawn_z = float(rng.uniform(0.70, 1.10))
+    bone_yaw_deg = float(rng.uniform(-180.0, 180.0))
+    return bone_x, bone_y, bone_spawn_z, bone_yaw_deg
+
+
+def _create_temp_bone_urdf(shaft_length, shaft_radius, end_height, end_radius):
+        shaft_length = max(float(shaft_length), 1e-3)
+        shaft_radius = max(float(shaft_radius), 1e-3)
+        end_height = max(float(end_height), 1e-3)
+        end_radius = max(float(end_radius), 1e-3)
+
+        density = 450.0
+        shaft_mass = float(density * np.pi * shaft_radius * shaft_radius * shaft_length)
+        end_mass = float(density * np.pi * end_radius * end_radius * end_height)
+        total_mass = max(shaft_mass + 2.0 * end_mass, 1e-6)
+
+        shaft_ixx = 0.5 * shaft_mass * shaft_radius * shaft_radius
+        shaft_iyy = (shaft_mass / 12.0) * (3.0 * shaft_radius * shaft_radius + shaft_length * shaft_length)
+        shaft_izz = shaft_iyy
+
+        end_ixx_local = (end_mass / 12.0) * (3.0 * end_radius * end_radius + end_height * end_height)
+        end_iyy_local = end_ixx_local
+        end_izz_local = 0.5 * end_mass * end_radius * end_radius
+        end_offset = 0.5 * shaft_length
+
+        end_ixx = end_ixx_local
+        end_iyy = end_iyy_local + end_mass * end_offset * end_offset
+        end_izz = end_izz_local + end_mass * end_offset * end_offset
+
+        ixx = max(shaft_ixx + 2.0 * end_ixx, 1e-9)
+        iyy = max(shaft_iyy + 2.0 * end_iyy, 1e-9)
+        izz = max(shaft_izz + 2.0 * end_izz, 1e-9)
+
+        urdf_text = f"""<?xml version=\"1.0\"?>
+<robot name=\"spawned_bone\">
+    <link name=\"bone_link\">
+        <inertial>
+            <origin xyz=\"0 0 0\" rpy=\"0 0 0\"/>
+            <mass value=\"{total_mass:.8f}\"/>
+            <inertia ixx=\"{ixx:.8f}\" ixy=\"0\" ixz=\"0\" iyy=\"{iyy:.8f}\" iyz=\"0\" izz=\"{izz:.8f}\"/>
+        </inertial>
+
+        <visual>
+            <origin xyz=\"0 0 0\" rpy=\"0 1.57079632679 0\"/>
+            <geometry>
+                <cylinder radius=\"{shaft_radius:.8f}\" length=\"{shaft_length:.8f}\"/>
+            </geometry>
+        </visual>
+        <collision>
+            <origin xyz=\"0 0 0\" rpy=\"0 1.57079632679 0\"/>
+            <geometry>
+                <cylinder radius=\"{shaft_radius:.8f}\" length=\"{shaft_length:.8f}\"/>
+            </geometry>
+        </collision>
+
+        <visual>
+            <origin xyz=\"{end_offset:.8f} 0 0\" rpy=\"0 0 0\"/>
+            <geometry>
+                <cylinder radius=\"{end_radius:.8f}\" length=\"{end_height:.8f}\"/>
+            </geometry>
+        </visual>
+        <collision>
+            <origin xyz=\"{end_offset:.8f} 0 0\" rpy=\"0 0 0\"/>
+            <geometry>
+                <cylinder radius=\"{end_radius:.8f}\" length=\"{end_height:.8f}\"/>
+            </geometry>
+        </collision>
+
+        <visual>
+            <origin xyz=\"{-end_offset:.8f} 0 0\" rpy=\"0 0 0\"/>
+            <geometry>
+                <cylinder radius=\"{end_radius:.8f}\" length=\"{end_height:.8f}\"/>
+            </geometry>
+        </visual>
+        <collision>
+            <origin xyz=\"{-end_offset:.8f} 0 0\" rpy=\"0 0 0\"/>
+            <geometry>
+                <cylinder radius=\"{end_radius:.8f}\" length=\"{end_height:.8f}\"/>
+            </geometry>
+        </collision>
+    </link>
+</robot>
+"""
+
+        temp_urdf = tempfile.NamedTemporaryFile(delete=False, suffix=".urdf", mode="w")
+        temp_urdf.write(urdf_text)
+        temp_urdf.close()
+        return temp_urdf.name
+
+
+def _summarize_neofetch_output(raw_output):
+    lines = []
+    for raw_line in str(raw_output or "").splitlines():
+        cleaned = raw_line.strip()
+        if cleaned:
+            lines.append(cleaned)
+
+    fields = {}
+    for line in lines:
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        key_text = key.strip().lower()
+        value_text = value.strip()
+        if key_text and value_text:
+            fields[key_text] = value_text
+
+    summary = {}
+    field_mapping = {
+        "os": "os",
+        "host": "host",
+        "kernel": "kernel",
+        "cpu": "cpu",
+        "gpu": "gpu",
+        "memory": "memory",
+    }
+    for output_key, summary_key in field_mapping.items():
+        value = fields.get(output_key)
+        if value:
+            summary[summary_key] = value
+
+    return {
+        "line_count": len(lines),
+        "raw": "\n".join(lines),
+        "summary": summary,
+    }
+
+
+def _collect_runtime_system_info():
+    cmd = ["neofetch", "--stdout"]
+    result_payload = {
+        "source": "neofetch",
+        "command": " ".join(cmd),
+        "ok": False,
+        "error": "",
+        "raw": "",
+        "summary": {},
+        "line_count": 0,
+    }
+
+    try:
+        completed = subprocess.run(
+            cmd,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10.0,
+        )
+    except Exception as exc:
+        result_payload["error"] = str(exc)
+        return result_payload
+
+    stdout = str(completed.stdout or "")
+    stderr = str(completed.stderr or "").strip()
+    parsed = _summarize_neofetch_output(stdout)
+
+    result_payload["ok"] = bool(completed.returncode == 0 and parsed["raw"])
+    result_payload["error"] = "" if result_payload["ok"] else (stderr or f"exit code {completed.returncode}")
+    result_payload["raw"] = parsed["raw"]
+    result_payload["summary"] = parsed["summary"]
+    result_payload["line_count"] = int(parsed["line_count"])
+
+    return result_payload
+
+
+def _render_neofetch_banner():
+    cmd = ["neofetch"]
+    env = os.environ.copy()
+    env["CLICOLOR_FORCE"] = "1"
+    try:
+        completed = subprocess.run(
+            cmd,
+            check=False,
+            timeout=10.0,
+            env=env,
+        )
+    except Exception as exc:
+        return False, str(exc)
+
+    if completed.returncode != 0:
+        return False, f"exit code {completed.returncode}"
+
+    return True, ""
 
 
 def _terminate_process(process, process_label):
@@ -479,6 +754,11 @@ def main():
     parser.add_argument("--video", action="store_true", help="Record and save a video (mp4)")
     parser.add_argument("--seed", type=int, default=None, help="Seed for reproducible robot and terrain randomization")
     parser.add_argument(
+        "--spawn-bone",
+        action="store_true",
+        help="Spawn a random bone prop somewhere on the terrain at startup.",
+    )
+    parser.add_argument(
         "--host",
         type=str,
         default=DEFAULT_BACKEND_HOST,
@@ -579,6 +859,19 @@ def main():
     )
     args = parser.parse_args()
 
+    print("Rendering neofetch banner...", flush=True)
+    banner_ok, banner_error = _render_neofetch_banner()
+    if not banner_ok:
+        print(f"Could not render neofetch banner: {banner_error}")
+
+    print("Collecting runtime system info using neofetch...", flush=True)
+    runtime_system_info = _collect_runtime_system_info()
+    if runtime_system_info.get("ok"):
+        print("Captured neofetch output for realtime session context.")
+    else:
+        error_text = str(runtime_system_info.get("error") or "unknown error")
+        print(f"Could not capture neofetch output: {error_text}")
+
     # Genesis seed binding expects a signed 32-bit integer.
     seed_modulus = np.iinfo(np.int32).max + 1
     if args.seed is None:
@@ -641,6 +934,40 @@ def main():
     for row in terrain_info["subterrain_types"]:
         print(f"    {row}")
 
+    bone_entity = None
+    bone_urdf_path = None
+    if args.spawn_bone:
+        bone_x, bone_y, bone_spawn_z, bone_yaw_deg = _sample_bone_spawn_pose(rng, terrain_info)
+        bone_length = float(rng.uniform(0.22, 0.38))
+        bone_radius = float(rng.uniform(0.022, 0.036))
+        bone_cap_height = float(rng.uniform(0.10, 0.16))
+        bone_cap_radius = float(bone_radius * rng.uniform(1.25, 1.70))
+        bone_urdf_path = _create_temp_bone_urdf(
+            shaft_length=bone_length,
+            shaft_radius=bone_radius,
+            end_height=bone_cap_height,
+            end_radius=bone_cap_radius,
+        )
+
+        bone_entity = scene.add_entity(
+            gs.morphs.URDF(
+                file=bone_urdf_path,
+                pos=(bone_x, bone_y, bone_spawn_z),
+                euler=(0.0, 0.0, bone_yaw_deg),
+            ),
+            name="spawned_bone",
+        )
+        print("Spawned random bone prop:")
+        print(f"  pos: ({bone_x:.3f}, {bone_y:.3f}, {bone_spawn_z:.3f})")
+        print(
+            "  shape: "
+            f"glued shaft length={bone_length:.3f} m, radius={bone_radius:.3f} m, yaw={bone_yaw_deg:+.1f} deg"
+        )
+        print(
+            "  ends: "
+            f"2 glued perpendicular cylinders height={bone_cap_height:.3f} m, radius={bone_cap_radius:.3f} m"
+        )
+
     # --- Randomization Step ---
     urdf_path, robot_params = generate_random_robot_urdf(rng)
     
@@ -657,8 +984,10 @@ def main():
 
     scene.build()
 
-    # Clean up the temporary file now that Genesis has parsed it
+    # Clean up temporary URDF files now that Genesis has parsed them.
     os.remove(urdf_path)
+    if bone_urdf_path is not None:
+        os.remove(bone_urdf_path)
 
     # Separate Leg DoFs from Wheel DoFs
     leg_dofs = []
@@ -797,7 +1126,16 @@ def main():
 
     _print_backend_endpoints(args.host, args.port)
     print("Starting WebRTC FastAPI thread...")
-    flask_thread = threading.Thread(target=run_server, args=(state, args.host, args.port), daemon=True)
+    flask_thread = threading.Thread(
+        target=run_server,
+        kwargs={
+            "state": state,
+            "host": args.host,
+            "port": args.port,
+            "runtime_info": runtime_system_info,
+        },
+        daemon=True,
+    )
     flask_thread.start()
 
     tunnel_process = None
@@ -851,9 +1189,11 @@ def main():
     voice_pwm_tick = 0
     prev_pos_xy = None
     prev_pitch = None
+    prev_heading = None
     pitch_neutral = 0.0
     filtered_forward_speed = 0.0
     filtered_pitch_rate = 0.0
+    filtered_yaw_rate = 0.0
     vx_cmd_smooth = 0.0
     rotate_hold_active = False
     rotate_hold_anchor_xy = np.zeros(2, dtype=float)
@@ -866,7 +1206,22 @@ def main():
     forward_accel_cmd = 0.0
     forward_speed_meas = 0.0
     pitch_rate_meas = 0.0
+    yaw_rate_meas = 0.0
+    drive_speed_ratio = 0.0
+    drive_power_scale = 1.0
+    vx_power_cap = float(KEYBOARD_VX_CMD)
+    omega_power_cap = float(abs(KEYBOARD_YAW_CMD))
+    drive_accel_limit = DRIVE_VX_ACCEL_LIMIT_STATIONARY
+    drive_brake_limit = DRIVE_VX_DECEL_LIMIT_STATIONARY
+    brake_throttle = 1.0
+    predictive_brake_scale = 1.0
+    vx_cmd_norm = 0.0
+    desired_accel_target = 0.0
+    desired_tilt_target = 0.0
     anti_tip_pitch_bias = 0.0
+    stance_shift_target_x = 0.0
+    stance_shift_leg_x = 0.0
+    bone_respawn_cooldown_steps = 0
 
     def _emit_voice_command_result(call_id, command, status, reason="", **extra):
         call_id_text = str(call_id or "").strip()
@@ -942,6 +1297,8 @@ def main():
             if prev_pitch is None:
                 prev_pitch = float(pitch)
                 pitch_neutral = float(pitch)
+            if prev_heading is None:
+                prev_heading = float(curr_heading)
 
             delta_pos_xy = curr_pos[:2] - prev_pos_xy
             forward_speed_raw = float(np.dot(delta_pos_xy / sim_dt, curr_forward_xy))
@@ -952,8 +1309,14 @@ def main():
             filtered_pitch_rate += DRIVE_STATE_FILTER_ALPHA * (pitch_rate_raw - filtered_pitch_rate)
             pitch_rate_meas = float(filtered_pitch_rate)
 
+            yaw_delta = (curr_heading - prev_heading + np.pi) % (2.0 * np.pi) - np.pi
+            yaw_rate_raw = float(yaw_delta / sim_dt)
+            filtered_yaw_rate += DRIVE_STATE_FILTER_ALPHA * (yaw_rate_raw - filtered_yaw_rate)
+            yaw_rate_meas = float(filtered_yaw_rate)
+
             prev_pos_xy = curr_pos[:2].copy()
             prev_pitch = float(pitch)
+            prev_heading = float(curr_heading)
 
             received_voice_cmd = str(voice_cmd).strip().lower() if voice_cmd else ""
             if received_voice_cmd == "stop":
@@ -1362,14 +1725,69 @@ def main():
                 anti_tip_pitch_bias = 0.0
                 prev_pos_xy = np.asarray(spawn_qs[0:2], dtype=float)
                 prev_pitch = 0.0
+                prev_heading = 0.0
                 pitch_neutral = 0.0
                 filtered_forward_speed = 0.0
                 filtered_pitch_rate = 0.0
+                filtered_yaw_rate = 0.0
+                yaw_rate_meas = 0.0
+                drive_speed_ratio = 0.0
+                drive_power_scale = 1.0
+                vx_power_cap = float(KEYBOARD_VX_CMD)
+                omega_power_cap = float(abs(KEYBOARD_YAW_CMD))
+                drive_accel_limit = DRIVE_VX_ACCEL_LIMIT_STATIONARY
+                drive_brake_limit = DRIVE_VX_DECEL_LIMIT_STATIONARY
+                brake_throttle = 1.0
+                predictive_brake_scale = 1.0
+                vx_cmd_norm = 0.0
+                desired_accel_target = 0.0
+                desired_tilt_target = 0.0
+                stance_shift_target_x = 0.0
+                stance_shift_leg_x = 0.0
                 roll = 0.0
                 pitch = 0.0
 
-            vx_cmd_raw = float(vx)
-            omega_cmd_raw = float(omega)
+            # Boost all operator/requested drive commands before safety envelopes.
+            vx = float(vx) * DRIVE_INPUT_VX_GAIN
+            omega = float(omega) * DRIVE_INPUT_OMEGA_GAIN
+
+            linear_speed_ratio = float(
+                np.clip(
+                    (abs(forward_speed_meas) - DRIVE_POWER_SPEED_START_MPS)
+                    / max(DRIVE_POWER_SPEED_FULL_MPS - DRIVE_POWER_SPEED_START_MPS, 1e-6),
+                    0.0,
+                    1.0,
+                )
+            )
+            yaw_speed_ratio = float(
+                np.clip(
+                    (abs(yaw_rate_meas) - DRIVE_POWER_YAW_START_RAD_S)
+                    / max(DRIVE_POWER_YAW_FULL_RAD_S - DRIVE_POWER_YAW_START_RAD_S, 1e-6),
+                    0.0,
+                    1.0,
+                )
+            )
+            drive_speed_ratio = float(max(linear_speed_ratio, yaw_speed_ratio))
+            drive_power_scale = float(
+                np.clip(
+                    DRIVE_POWER_SCALE_MIN
+                    + (DRIVE_POWER_SCALE_MAX - DRIVE_POWER_SCALE_MIN) * drive_speed_ratio,
+                    DRIVE_POWER_SCALE_MIN,
+                    DRIVE_POWER_SCALE_MAX,
+                )
+            )
+            omega_scale = float(
+                np.clip(
+                    1.0 + (DRIVE_OMEGA_SCALE_MAX - 1.0) * drive_speed_ratio,
+                    1.0,
+                    DRIVE_OMEGA_SCALE_MAX,
+                )
+            )
+            vx_power_cap = float(KEYBOARD_VX_CMD * drive_power_scale)
+            omega_power_cap = float(abs(KEYBOARD_YAW_CMD) * omega_scale)
+
+            vx_cmd_raw = float(np.clip(vx, -vx_power_cap, vx_power_cap))
+            omega_cmd_raw = float(np.clip(omega, -omega_power_cap, omega_power_cap))
 
             rotate_only_requested = (
                 abs(omega_cmd_raw) > ROTATE_ONLY_OMEGA_MIN
@@ -1410,15 +1828,83 @@ def main():
 
             vx_cmd_after_rotate = float(vx_cmd_raw + rotate_drift_correction)
 
+            # Predictive desired longitudinal acceleration from normalized command.
+            vx_cmd_norm = float(np.clip(vx_cmd_after_rotate / max(vx_power_cap, 1e-6), -1.0, 1.0))
+            desired_speed_target = float(vx_cmd_norm * STANCE_SHIFT_CMD_SPEED_MAX_MPS)
+            speed_error = float(desired_speed_target - forward_speed_meas)
+            desired_accel_target = float(
+                np.clip(
+                    STANCE_SHIFT_SPEED_ERROR_TO_ACCEL_GAIN * speed_error,
+                    -STANCE_SHIFT_ACCEL_MAX_MPS2,
+                    STANCE_SHIFT_ACCEL_MAX_MPS2,
+                )
+            )
+            desired_tilt_target = float(np.arctan2(desired_accel_target, 9.81))
+            decel_alignment = float(-np.sign(forward_speed_meas) * desired_accel_target)
+            decel_demand = float(
+                np.clip(
+                    decel_alignment / max(STANCE_SHIFT_ACCEL_MAX_MPS2, 1e-6),
+                    0.0,
+                    1.0,
+                )
+            )
+            predictive_brake_scale = float(1.0 + DRIVE_BRAKE_PREDICTIVE_GAIN * decel_demand)
+
+            dynamic_pitch_for_brake = float(pitch - pitch_neutral)
+            brake_pitch_risk = float(
+                np.clip(
+                    (abs(dynamic_pitch_for_brake) - DRIVE_BRAKE_PITCH_WARN_RAD)
+                    / max(DRIVE_BRAKE_PITCH_BLOCK_RAD - DRIVE_BRAKE_PITCH_WARN_RAD, 1e-6),
+                    0.0,
+                    1.0,
+                )
+            )
+            brake_pitch_rate_risk = float(
+                np.clip(
+                    (abs(pitch_rate_meas) - DRIVE_BRAKE_PITCH_RATE_WARN_RAD_S)
+                    / max(DRIVE_BRAKE_PITCH_RATE_BLOCK_RAD_S - DRIVE_BRAKE_PITCH_RATE_WARN_RAD_S, 1e-6),
+                    0.0,
+                    1.0,
+                )
+            )
+            drive_accel_limit = float(
+                DRIVE_VX_ACCEL_LIMIT_STATIONARY
+                + (DRIVE_VX_ACCEL_LIMIT - DRIVE_VX_ACCEL_LIMIT_STATIONARY) * drive_speed_ratio
+            ) * DRIVE_ACCEL_RESPONSE_GAIN
+            drive_brake_limit = float(
+                DRIVE_VX_DECEL_LIMIT_STATIONARY
+                + (DRIVE_VX_DECEL_LIMIT - DRIVE_VX_DECEL_LIMIT_STATIONARY) * drive_speed_ratio
+            ) * DRIVE_BRAKE_RESPONSE_GAIN
+
             prev_vx_cmd_smooth = float(vx_cmd_smooth)
             vx_target_delta = vx_cmd_after_rotate - prev_vx_cmd_smooth
-            if np.sign(vx_cmd_after_rotate) == np.sign(prev_vx_cmd_smooth):
-                if abs(vx_cmd_after_rotate) > abs(prev_vx_cmd_smooth):
-                    max_vx_step = DRIVE_VX_ACCEL_LIMIT * sim_dt
-                else:
-                    max_vx_step = DRIVE_VX_DECEL_LIMIT * sim_dt
+            same_direction = np.sign(vx_cmd_after_rotate) == np.sign(prev_vx_cmd_smooth)
+            accelerating = same_direction and abs(vx_cmd_after_rotate) > abs(prev_vx_cmd_smooth)
+
+            brake_throttle = 1.0
+            if not accelerating:
+                brake_throttle = float(
+                    np.clip(
+                        1.0 - 0.55 * brake_pitch_risk - 0.45 * brake_pitch_rate_risk,
+                        DRIVE_BRAKE_THROTTLE_MIN,
+                        1.0,
+                    )
+                )
+                reversing = (
+                    np.sign(vx_cmd_after_rotate) != 0.0
+                    and np.sign(prev_vx_cmd_smooth) != 0.0
+                    and np.sign(vx_cmd_after_rotate) != np.sign(prev_vx_cmd_smooth)
+                )
+                if reversing:
+                    brake_throttle = max(
+                        DRIVE_BRAKE_THROTTLE_MIN,
+                        brake_throttle * DRIVE_BRAKE_REVERSE_SCALE,
+                    )
+
+            if accelerating:
+                max_vx_step = drive_accel_limit * sim_dt
             else:
-                max_vx_step = DRIVE_VX_DECEL_LIMIT * sim_dt
+                max_vx_step = drive_brake_limit * predictive_brake_scale * brake_throttle * sim_dt
 
             vx_cmd_smooth = prev_vx_cmd_smooth + float(np.clip(vx_target_delta, -max_vx_step, max_vx_step))
             forward_accel_cmd = float((vx_cmd_smooth - prev_vx_cmd_smooth) / sim_dt)
@@ -1482,7 +1968,13 @@ def main():
             if front_traction_blocked:
                 vx_cmd_limited = 0.0
 
-            balance_gain = float(np.clip(abs(forward_accel_cmd) / ANTI_TIP_BALANCE_ACCEL_REF, 0.0, 1.0))
+            balance_gain = float(
+                np.clip(
+                    abs(desired_accel_target) / max(STANCE_SHIFT_ACCEL_MAX_MPS2, 1e-6),
+                    0.0,
+                    1.0,
+                )
+            )
             balance_gain = max(balance_gain, front_unload_risk)
             anti_tip_pitch_bias = -(
                 ANTI_TIP_PITCH_DAMP_GAIN * pitch_rate_meas
@@ -1494,6 +1986,34 @@ def main():
                     anti_tip_pitch_bias,
                     -ANTI_TIP_MAX_SETPOINT_BIAS_RAD,
                     ANTI_TIP_MAX_SETPOINT_BIAS_RAD,
+                )
+            )
+
+            # Single inverted-pendulum target driven by desired tilt.
+            stance_target_uncapped = STANCE_SHIFT_TILT_TO_LEG_X_GAIN * desired_tilt_target
+            stance_scale = float(
+                np.clip(
+                    1.0 - STANCE_SHIFT_RISK_REDUCTION_GAIN * front_unload_risk,
+                    STANCE_SHIFT_MIN_SCALE,
+                    1.0,
+                )
+            )
+
+            stance_shift_target_x = float(
+                np.clip(
+                    stance_target_uncapped * stance_scale,
+                    -STANCE_SHIFT_MAX_LEG_X_M,
+                    STANCE_SHIFT_MAX_LEG_X_M,
+                )
+            )
+            stance_shift_leg_x += STANCE_SHIFT_FILTER_ALPHA * (
+                stance_shift_target_x - stance_shift_leg_x
+            )
+            stance_shift_leg_x = float(
+                np.clip(
+                    stance_shift_leg_x,
+                    -STANCE_SHIFT_MAX_LEG_X_M,
+                    STANCE_SHIFT_MAX_LEG_X_M,
                 )
             )
 
@@ -1516,33 +2036,37 @@ def main():
 
             if respawn_settle_steps > 0:
                 respawn_settle_steps -= 1
-            elif suspension_enabled:
-                pitch_pid_output = float(np.clip(pitch_pid.update(pitch, sim_dt), -MAX_PID_Z_ADJUST, MAX_PID_Z_ADJUST))
-                roll_pid_output = float(np.clip(roll_pid.update(roll, sim_dt), -MAX_PID_Z_ADJUST, MAX_PID_Z_ADJUST))
+            else:
+                if suspension_enabled:
+                    pitch_pid_output = float(np.clip(pitch_pid.update(pitch, sim_dt), -MAX_PID_Z_ADJUST, MAX_PID_Z_ADJUST))
+                    roll_pid_output = float(np.clip(roll_pid.update(roll, sim_dt), -MAX_PID_Z_ADJUST, MAX_PID_Z_ADJUST))
 
-                pitch_delta_z = pitch_mix_sign * pitch_pid_output
-                roll_delta_z = roll_mix_sign * roll_pid_output
+                    pitch_delta_z = pitch_mix_sign * pitch_pid_output
+                    roll_delta_z = roll_mix_sign * roll_pid_output
 
-                # 2. Mix pitch and roll corrections into each leg target.
-                leg_delta_z = {
-                    "fl": pitch_delta_z - roll_delta_z,
-                    "fr": pitch_delta_z + roll_delta_z,
-                    "rl": -pitch_delta_z - roll_delta_z,
-                    "rr": -pitch_delta_z + roll_delta_z,
-                }
+                apply_stance_ik = suspension_enabled or abs(stance_shift_leg_x) > STANCE_SHIFT_IK_MIN_X_M
+                if apply_stance_ik:
+                    # 2. Mix pitch/roll suspension and dynamic fore-aft stance into each leg target.
+                    leg_delta_z = {
+                        "fl": pitch_delta_z - roll_delta_z,
+                        "fr": pitch_delta_z + roll_delta_z,
+                        "rl": -pitch_delta_z - roll_delta_z,
+                        "rr": -pitch_delta_z + roll_delta_z,
+                    }
 
-                for prefix, delta_z in leg_delta_z.items():
-                    desired_leg_z = nominal_leg_z + float(np.clip(delta_z, -MAX_LEG_DELTA_Z, MAX_LEG_DELTA_Z))
-                    hip_angle, knee_angle = _ik_two_link_for_vertical_position(
-                        desired_leg_z=desired_leg_z,
-                        thigh_length=thigh_length,
-                        calf_length=calf_length,
-                    )
+                    for prefix, delta_z in leg_delta_z.items():
+                        desired_leg_z = nominal_leg_z + float(np.clip(delta_z, -MAX_LEG_DELTA_Z, MAX_LEG_DELTA_Z))
+                        hip_angle, knee_angle = _ik_two_link_for_vertical_position(
+                            desired_leg_z=desired_leg_z,
+                            desired_leg_x=stance_shift_leg_x,
+                            thigh_length=thigh_length,
+                            calf_length=calf_length,
+                        )
 
-                    hip_dof = leg_joint_dofs[prefix]["hip"]
-                    knee_dof = leg_joint_dofs[prefix]["knee"]
-                    target_leg_pos[leg_dof_to_local_idx[hip_dof]] = hip_angle
-                    target_leg_pos[leg_dof_to_local_idx[knee_dof]] = knee_angle
+                        hip_dof = leg_joint_dofs[prefix]["hip"]
+                        knee_dof = leg_joint_dofs[prefix]["knee"]
+                        target_leg_pos[leg_dof_to_local_idx[hip_dof]] = hip_angle
+                        target_leg_pos[leg_dof_to_local_idx[knee_dof]] = knee_angle
 
             # 3. Apply leg position control from the suspension IK.
             robot.control_dofs_position(target_leg_pos, dofs_idx_local=leg_dofs)
@@ -1639,18 +2163,36 @@ def main():
                     [
                         "[Speed Debug]",
                         f" vx_raw {vx_cmd_raw:+.3f}",
+                        f" speed_ratio {drive_speed_ratio:.2f}",
+                        f" power_scale {drive_power_scale:.2f}x",
+                        f" vx_cap {vx_power_cap:+.3f}",
+                        f" omega_cap {omega_power_cap:+.3f}",
                         f" vx_smooth {vx_cmd_smooth:+.3f}",
                         f" vx_cmd {vx:+.3f} m/s",
                         f" omega_cmd {omega:+.3f} rad/s",
                         f" v_forward {forward_speed_meas:+.3f} m/s",
                         f" pitch_rate {np.degrees(pitch_rate_meas):+.1f} deg/s",
+                        f" yaw_rate {np.degrees(yaw_rate_meas):+.1f} deg/s",
+                        f" accel_lim {drive_accel_limit:.1f} cmd/s",
+                        f" brake_lim {drive_brake_limit * predictive_brake_scale * brake_throttle:.1f} cmd/s",
+                        f" brake_ff {predictive_brake_scale:.2f}x",
+                        f" brake_throttle {brake_throttle:.2f}",
+                        f" vx_norm {vx_cmd_norm:+.2f}",
+                        f" accel_des {desired_accel_target:+.2f} m/s^2",
+                        f" tilt_des {np.degrees(desired_tilt_target):+.1f} deg",
                         f" accel_cmd {forward_accel_cmd:+.2f} cmd/s",
                         f" rot_drift {rotate_drift_err_m:+.3f} m",
                         f" rot_corr {rotate_drift_correction:+.3f}",
                         f" traction_risk {front_unload_risk:.2f}",
                         f" traction_scale {traction_scale:.2f}",
                         f" traction_block {'YES' if front_traction_blocked else 'no'}",
+                        f" cmd_gain_vx {DRIVE_INPUT_VX_GAIN:.2f}x",
+                        f" cmd_gain_omega {DRIVE_INPUT_OMEGA_GAIN:.2f}x",
+                        f" accel_gain {DRIVE_ACCEL_RESPONSE_GAIN:.2f}x",
+                        f" brake_gain {DRIVE_BRAKE_RESPONSE_GAIN:.2f}x",
                         f" anti_tip_bias {np.degrees(anti_tip_pitch_bias):+.2f} deg",
+                        f" stance_target_x {stance_shift_target_x:+.3f} m",
+                        f" stance_leg_x {stance_shift_leg_x:+.3f} m",
                         f" wheel_left {left_vel:+.3f}",
                         f" wheel_right {right_vel:+.3f}",
                     ]
@@ -1664,6 +2206,44 @@ def main():
                     print("Viewer closed. Exiting simulation loop.")
                     break
                 raise
+
+            if bone_entity is not None:
+                if bone_respawn_cooldown_steps > 0:
+                    bone_respawn_cooldown_steps -= 1
+                else:
+                    robot_bone_contacts = robot.get_contacts(with_entity=bone_entity)
+                    robot_bone_geom_a = robot_bone_contacts.get("geom_a")
+                    has_robot_bone_contact = False
+                    if robot_bone_geom_a is not None:
+                        if hasattr(robot_bone_geom_a, "numel"):
+                            has_robot_bone_contact = bool(int(robot_bone_geom_a.numel()) > 0)
+                        else:
+                            has_robot_bone_contact = bool(np.asarray(robot_bone_geom_a).size > 0)
+
+                    if has_robot_bone_contact:
+                        robot_pos_after_step = robot.get_pos()
+                        if hasattr(robot_pos_after_step, "cpu"):
+                            robot_pos_after_step = robot_pos_after_step.cpu()
+                        robot_pos_after_step = np.asarray(robot_pos_after_step, dtype=float).reshape(-1)
+
+                        new_x, new_y, new_z, new_yaw_deg = _sample_bone_spawn_pose(
+                            rng,
+                            terrain_info,
+                            avoid_xy=robot_pos_after_step[:2],
+                        )
+                        new_yaw_rad = float(np.deg2rad(new_yaw_deg))
+                        half_angle = 0.5 * new_yaw_rad
+                        bone_entity.set_pos((new_x, new_y, new_z), zero_velocity=True)
+                        bone_entity.set_quat(
+                            (float(np.cos(half_angle)), 0.0, 0.0, float(np.sin(half_angle))),
+                            zero_velocity=True,
+                            relative=False,
+                        )
+                        bone_respawn_cooldown_steps = BONE_RESPAWN_COOLDOWN_STEPS
+                        print(
+                            "Bone collision detected. Respawned bone at "
+                            f"({new_x:.3f}, {new_y:.3f}, {new_z:.3f}), yaw={new_yaw_deg:+.1f} deg"
+                        )
 
             camera_controller.update(robot, cam_dx=cam_dx, cam_dy=cam_dy, cam_zoom=cam_zoom)
 

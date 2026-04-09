@@ -22,7 +22,7 @@ except Exception:
     print("aiortc not installed. WebRTC disabled. Using WebSockets as primary.")
 
 
-def create_app(state):
+def create_app(state, runtime_info=None):
     app = FastAPI()
     active_websockets = set()
     active_datachannels = set()
@@ -30,6 +30,7 @@ def create_app(state):
     broadcast_task = None
     recent_outgoing_events = deque(maxlen=1200)
     next_event_id = 0
+    runtime_info_payload = runtime_info if isinstance(runtime_info, dict) else {}
 
     app.add_middleware(
         CORSMiddleware,
@@ -154,7 +155,10 @@ def create_app(state):
 
     @app.get("/capabilities")
     async def capabilities():
-        return {"webrtc": bool(HAS_WEBRTC)}
+        return {
+            "webrtc": bool(HAS_WEBRTC),
+            "runtime_info": runtime_info_payload,
+        }
 
     @app.post("/command")
     async def command(payload: dict):
@@ -227,6 +231,6 @@ def create_app(state):
     return app
 
 
-def run_server(state, host="0.0.0.0", port=8000):
-    app = create_app(state)
+def run_server(state, host="0.0.0.0", port=8000, runtime_info=None):
+    app = create_app(state, runtime_info=runtime_info)
     uvicorn.run(app, host=host, port=port, log_level="error")
