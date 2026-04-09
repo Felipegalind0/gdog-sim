@@ -117,7 +117,7 @@ VOICE_ROT_TIMEOUT_PER_RAD_S = 5.0
 VOICE_PROGRESS_EMIT_INTERVAL_S = 0.1
 VOICE_STUCK_CHECK_INTERVAL_S = 0.1
 VOICE_STUCK_GRACE_S = 0.7
-VOICE_STUCK_WINDOW_S = 1.5
+VOICE_STUCK_WINDOW_S = 2.0
 VOICE_MOVE_STUCK_SPEED_MPS = 0.05
 VOICE_ROT_STUCK_SPEED_RAD_S = float(np.deg2rad(3.0))
 DEFAULT_BACKEND_HOST = "0.0.0.0"
@@ -1149,6 +1149,7 @@ def main():
                                     "Robot stopped making progress toward the move target "
                                     f"({speed:.2f} m/s for {VOICE_STUCK_WINDOW_S:.1f}s)."
                                 ),
+                                stuck_for_s=float(VOICE_STUCK_WINDOW_S),
                             )
                             vx = 0.0
                             omega = 0.0
@@ -1242,6 +1243,7 @@ def main():
                                     "Robot stopped making progress toward the rotate target "
                                     f"({np.degrees(speed):.1f} deg/s for {VOICE_STUCK_WINDOW_S:.1f}s)."
                                 ),
+                                stuck_for_s=float(VOICE_STUCK_WINDOW_S),
                             )
                             vx = 0.0
                             omega = 0.0
