@@ -110,9 +110,8 @@ VOICE_ROT_PULSE_NEAR_RAD = float(np.deg2rad(8.0))
 VOICE_ROT_PULSE_MID_RAD = float(np.deg2rad(24.0))
 VOICE_TASK_TIP_PITCH_RAD = float(np.deg2rad(60.0))
 VOICE_TASK_TIP_ROLL_RAD = float(np.deg2rad(60.0))
-VOICE_MOVE_TIMEOUT_MIN_S = 6.0
-VOICE_MOVE_TIMEOUT_PER_M_S = 10.0
-VOICE_MOVE_STARTUP_GRACE_S = 3.0
+VOICE_MOVE_TIMEOUT_MIN_S = 4.0
+VOICE_MOVE_TIMEOUT_PER_M_S = 8.0
 VOICE_ROT_TIMEOUT_MIN_S = 4.0
 VOICE_ROT_TIMEOUT_PER_RAD_S = 5.0
 DEFAULT_BACKEND_HOST = "0.0.0.0"
@@ -869,15 +868,13 @@ def main():
                         timeout_s = max(
                             VOICE_MOVE_TIMEOUT_MIN_S,
                             float(requested_amt) * VOICE_MOVE_TIMEOUT_PER_M_S,
-                        ) + VOICE_MOVE_STARTUP_GRACE_S
+                        )
                         active_voice_task = {
                             "type": "move",
                             "dir_sign": move_sign,
                             "target": requested_amt,
                             "start_pos_xy": curr_pos[:2].copy(),
                             "start_forward_xy": curr_forward_xy.copy(),
-                            "prev_pos_xy": curr_pos[:2].copy(),
-                            "path_progress_m": 0.0,
                             "call_id": voice_call_id,
                             "started_at": float(time.monotonic()),
                             "timeout_s": timeout_s,
@@ -978,17 +975,8 @@ def main():
 
                 if active_voice_task["type"] == "move":
                     displacement_xy = curr_pos[:2] - active_voice_task["start_pos_xy"]
-                    step_disp_xy = curr_pos[:2] - active_voice_task["prev_pos_xy"]
-                    active_voice_task["prev_pos_xy"] = curr_pos[:2].copy()
-
-                    step_progress = float(np.dot(step_disp_xy, curr_forward_xy))
-                    step_progress *= float(active_voice_task["dir_sign"])
-                    if step_progress > 0.0:
-                        active_voice_task["path_progress_m"] = float(active_voice_task["path_progress_m"] + step_progress)
-
-                    projected_progress = float(np.dot(displacement_xy, active_voice_task["start_forward_xy"]))
-                    projected_progress *= float(active_voice_task["dir_sign"])
-                    progress = float(max(projected_progress, active_voice_task["path_progress_m"]))
+                    progress = float(np.dot(displacement_xy, active_voice_task["start_forward_xy"]))
+                    progress *= float(active_voice_task["dir_sign"])
                     remaining = float(active_voice_task["target"]) - progress
                     lateral_axis_xy = np.array(
                         [
@@ -1005,8 +993,6 @@ def main():
                                 active_voice_task,
                                 status="completed",
                                 progress_m=float(progress),
-                                projected_progress_m=float(projected_progress),
-                                path_progress_m=float(active_voice_task["path_progress_m"]),
                                 target_m=float(active_voice_task["target"]),
                                 remaining_m=float(max(remaining, 0.0)),
                                 lateral_error_m=float(lateral_error_m),
@@ -1017,8 +1003,6 @@ def main():
                                 status="failed",
                                 reason="Robot reached the wrong destination (path deviation too large).",
                                 progress_m=float(progress),
-                                projected_progress_m=float(projected_progress),
-                                path_progress_m=float(active_voice_task["path_progress_m"]),
                                 target_m=float(active_voice_task["target"]),
                                 remaining_m=float(max(remaining, 0.0)),
                                 lateral_error_m=float(lateral_error_m),

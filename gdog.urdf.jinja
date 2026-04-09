@@ -60,6 +60,12 @@
       <origin xyz="0 0 0" rpy="1.5708 0 0"/> 
       <material name="wheel_black"><color rgba="0.02 0.02 0.02 1"/></material>
     </visual>
+    <visual>
+      <!-- Cosmetic white spoke to see wheel rotation -->
+      <geometry><box size="{{ wheel_radius * 2 }} 0.01 {{ wheel_width + 0.002 }}"/></geometry>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/> 
+      <material name="spoke_white"><color rgba="1 1 1 1"/></material>
+    </visual>
     <collision>
       <geometry><cylinder radius="{{ wheel_radius }}" length="{{ wheel_width }}"/></geometry>
       <origin xyz="0 0 0" rpy="1.5708 0 0"/>

@@ -12,16 +12,16 @@ def generate_random_robot_urdf(rng):
 
     # Generate Random Parameters (Domain Randomization)
     robot_params = {
-        "body_length": rng.uniform(0.4, 0.6),
-        "body_width": rng.uniform(0.1, 0.2),
+        "body_length": rng.uniform(0.4, 0.5),
+        "body_width": rng.uniform(0.15, 0.2),
         "body_height": rng.uniform(0.08, 0.15),
-        "body_mass": rng.uniform(3.0, 5.0),
+        "body_mass": rng.uniform(3.0, 4.0),
         "leg_thickness": rng.uniform(0.04, 0.06),
         "thigh_length": rng.uniform(0.18, 0.25),
         "calf_thickness": rng.uniform(0.03, 0.05),
         "calf_length": rng.uniform(0.18, 0.25),
-        "wheel_radius": rng.uniform(0.04, 0.08),
-        "wheel_width": rng.uniform(0.03, 0.06),
+        "wheel_radius": rng.uniform(0.04, 0.06),
+        "wheel_width": rng.uniform(0.03, 0.04),
     }
 
     # Render URDF XML string
