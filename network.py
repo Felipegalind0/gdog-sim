@@ -22,7 +22,7 @@ except Exception:
     print("aiortc not installed. WebRTC disabled. Using WebSockets as primary.")
 
 
-def create_app(state, runtime_info=None):
+def create_app(state, runtime_info=None, tune_registry=None):
     app = FastAPI()
     active_websockets = set()
     active_datachannels = set()
@@ -41,6 +41,12 @@ def create_app(state, runtime_info=None):
     )
 
     def _handle_incoming_payload(payload):
+        # Handle tune commands before normal command parsing.
+        tune_cmd = payload.get("tune_cmd")
+        if tune_cmd is not None:
+            _handle_tune_payload(payload, tune_cmd)
+            return
+
         args = _parse_command_payload(payload)
         voice_cmd = payload.get("voice_cmd")
         voice_direction = payload.get("direction")
@@ -56,6 +62,38 @@ def create_app(state, runtime_info=None):
             voice_amount=voice_amount,
             voice_call_id=voice_call_id,
         )
+
+    def _handle_tune_payload(payload, tune_cmd):
+        if tune_registry is None:
+            state.push_outgoing({"type": "tune_list", "vars": []})
+            return
+
+        cmd = str(tune_cmd).strip().lower()
+        if cmd == "list":
+            state.push_outgoing({"type": "tune_list", "vars": tune_registry.list_all()})
+        elif cmd == "set":
+            name = str(payload.get("name", "")).strip()
+            try:
+                value = float(payload.get("value", 0))
+            except (TypeError, ValueError):
+                state.push_outgoing({"type": "tune_result", "name": name, "ok": False})
+                return
+            new_val = tune_registry.set(name, value)
+            state.push_outgoing({
+                "type": "tune_result",
+                "name": name,
+                "value": new_val,
+                "ok": new_val is not None,
+            })
+        elif cmd == "reset":
+            name = str(payload.get("name", "")).strip()
+            if name:
+                tune_registry.reset(name)
+            else:
+                tune_registry.reset()
+            state.push_outgoing({"type": "tune_list", "vars": tune_registry.list_all()})
+        else:
+            state.push_outgoing({"type": "tune_list", "vars": tune_registry.list_all()})
 
     async def _broadcast_outgoing_loop():
         nonlocal next_event_id
@@ -160,6 +198,12 @@ def create_app(state, runtime_info=None):
             "runtime_info": runtime_info_payload,
         }
 
+    @app.get("/tune")
+    async def tune_list_endpoint():
+        if tune_registry is None:
+            return {"ok": True, "vars": []}
+        return {"ok": True, "vars": tune_registry.list_all()}
+
     @app.post("/command")
     async def command(payload: dict):
         if not isinstance(payload, dict):
@@ -231,6 +275,6 @@ def create_app(state, runtime_info=None):
     return app
 
 
-def run_server(state, host="0.0.0.0", port=8000, runtime_info=None):
-    app = create_app(state, runtime_info=runtime_info)
+def run_server(state, host="0.0.0.0", port=8000, runtime_info=None, tune_registry=None):
+    app = create_app(state, runtime_info=runtime_info, tune_registry=tune_registry)
     uvicorn.run(app, host=host, port=port, log_level="error")

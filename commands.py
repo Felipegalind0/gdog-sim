@@ -5,6 +5,61 @@ import numpy as np
 
 
 PID_GAIN_MAX = 2.0
+
+
+class TuneRegistry:
+    """Thread-safe registry of tunable simulation variables with range metadata."""
+
+    def __init__(self):
+        self._lock = threading.RLock()
+        self._vars = {}
+
+    def register(self, name, value, min_val, max_val, step):
+        with self._lock:
+            self._vars[name] = {
+                "value": float(value),
+                "default": float(value),
+                "min": float(min_val),
+                "max": float(max_val),
+                "step": float(step),
+            }
+
+    def get(self, name):
+        with self._lock:
+            entry = self._vars.get(name)
+            return float(entry["value"]) if entry else None
+
+    def set(self, name, value):
+        with self._lock:
+            entry = self._vars.get(name)
+            if entry is None:
+                return None
+            clamped = float(max(entry["min"], min(entry["max"], float(value))))
+            entry["value"] = clamped
+            return clamped
+
+    def snapshot(self):
+        with self._lock:
+            return {name: float(e["value"]) for name, e in self._vars.items()}
+
+    def list_all(self):
+        with self._lock:
+            return [
+                {"name": name, **{k: v for k, v in entry.items()}}
+                for name, entry in self._vars.items()
+            ]
+
+    def reset(self, name=None):
+        with self._lock:
+            if name is not None:
+                entry = self._vars.get(name)
+                if entry:
+                    entry["value"] = entry["default"]
+                    return float(entry["value"])
+                return None
+            for entry in self._vars.values():
+                entry["value"] = entry["default"]
+            return None
 CANONICAL_CMD_KEYS = (
     "kp",
     "ki",
